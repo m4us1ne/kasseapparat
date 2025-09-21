@@ -2,7 +2,7 @@ ARG VERSION
 ARG BUILD_DATE
 
 # Build the frontend
-FROM --platform=$BUILDPLATFORM node:24 AS frontend-build
+FROM  node:24 AS frontend-build
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/yarn.lock frontend/.yarnrc.yml ./
 RUN corepack enable && \
@@ -11,7 +11,7 @@ COPY frontend .
 RUN corepack yarn vite build --outDir ./build
 
 # Build the backend
-FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS backend-build
+FROM   golang:1.25-bookworm AS backend-build
 WORKDIR /app/backend
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -24,7 +24,7 @@ RUN CGO_ENABLED=1 go build -o kasseapparat ./cmd/main.go && \
     CGO_ENABLED=1 go build -o kasseapparat-tool ./tools/main.go
 
 # Create the final image
-FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS runtime
+FROM  debian:bookworm-slim AS runtime
 
 ARG VERSION
 ARG BUILD_DATE
