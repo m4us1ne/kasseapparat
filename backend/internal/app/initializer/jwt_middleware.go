@@ -8,7 +8,7 @@ import (
 )
 
 func InitializeJwtMiddleware(repository *sqliteRepo.Repository, jwtConfig config.JwtConfig) *jwt.GinJWTMiddleware {
-	const timeout = 10 // Duration that a jwt token is valid, in minutes
+	const timeout = 60 // Duration that a jwt token is valid, in minutes
 
 	jwtMiddleware, err := jwt.New(middleware.InitParams(repository, jwtConfig.Realm, jwtConfig.Secret, timeout))
 	if err != nil {
