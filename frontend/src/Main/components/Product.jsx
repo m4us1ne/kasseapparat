@@ -40,7 +40,7 @@ const Product = ({
     product.totalStock - product.unitsSold - quantityByProductInCart(product);
 
   const handleCardClick = () => {
-    if (product.soldOut) {
+    if (product.soldOut || availableStock <= 0) {
       console.log("ioen");
       setIsPIModalOpen(true);
     } else if (product.guestlists.length > 0) {
