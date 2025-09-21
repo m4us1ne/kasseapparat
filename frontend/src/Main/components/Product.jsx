@@ -72,14 +72,13 @@ const Product = ({
           >
             {product.name}
           </h5>
-          {!product.soldOut && product.totalStock > 0 && (
-            <div className="text-sm dark:text-white">
+          {!product.soldOut && product.totalStock > 0  && product.totalStock < 1000 && (
+            <div className="text-1xl text-left text-balance font-bold tracking-tight text-gray-900 dark:text-gray-200">
               {availableStock >= 0 && (
                 <span>
-                  {availableStock} /{"  "}
+                  {availableStock} 
                 </span>
               )}
-              {product.totalStock}
             </div>
           )}
         </div>
