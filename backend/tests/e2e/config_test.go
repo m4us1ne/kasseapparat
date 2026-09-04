@@ -5,13 +5,14 @@ import (
 	"testing"
 )
 
-var configUrl = "/api/v2/config"
+var configURL = "/api/v3/config"
 
 func TestGetConfig(t *testing.T) {
 	_, cleanup := setupTestEnvironment(t)
 	defer cleanup()
 
-	config := e.GET(configUrl).
+	config := e.GET(configURL).
+		WithHeader("X-Remote-User", "testuser").
 		Expect().
 		Status(http.StatusOK).JSON().Object()
 
@@ -23,7 +24,30 @@ func TestGetConfig(t *testing.T) {
 	config.Value("currencyLocale").String().Match("^[a-z]{2}-[A-Z]{2}$")
 	config.Value("currencyCode").String().Match("^[A-Z]{3}$")
 	config.Value("dateLocale").String().Match("^[a-z]{2}-[A-Z]{2}$")
-	config.Value("dateOptions").String().Contains("{\"weekday\":\"long\",\"hour\":\"2-digit\",\"minute\":\"2-digit\"}")
 	config.Value("fractionDigitsMin").Number().IsEqual(0)
 	config.Value("fractionDigitsMax").Number().IsEqual(2)
+	config.Value("authMode").String().Match("^(proxy|oidc)$")
+
+	config.Value("dateOptions").Object()
+	config.Value("dateOptions").Object().Value("weekday").IsEqual("long")
+	config.Value("dateOptions").Object().Value("hour").IsEqual("2-digit")
+	config.Value("dateOptions").Object().Value("minute").IsEqual("2-digit")
+
+	paymentMethods := config.Value("paymentMethods").Array()
+	paymentMethods.NotEmpty()
+
+	for _, item := range paymentMethods.Iter() {
+		obj := item.Object()
+		obj.Value("code").String().NotEmpty()
+		obj.Value("name").String().NotEmpty()
+	}
+
+	vatRates := config.Value("vatRates").Array()
+	vatRates.NotEmpty()
+
+	for _, item := range vatRates.Iter() {
+		obj := item.Object()
+		obj.Value("rate").Number()
+		obj.Value("name").String().NotEmpty()
+	}
 }

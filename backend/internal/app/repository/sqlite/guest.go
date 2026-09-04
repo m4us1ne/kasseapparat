@@ -16,7 +16,7 @@ var (
 type GuestFilters struct {
 	Query       string
 	GuestlistID int
-	ListGroupId int
+	ListGroupID int
 	Present     bool
 	NotPresent  bool
 	IDs         []int
@@ -53,7 +53,13 @@ func (filters GuestFilters) AddWhere(query *gorm.DB) *gorm.DB {
 	return query
 }
 
-func (repo *Repository) GetGuests(limit int, offset int, sort string, order string, filters GuestFilters) ([]models.Guest, error) {
+func (repo *Repository) GetGuests(
+	limit int,
+	offset int,
+	sort string,
+	order string,
+	filters GuestFilters,
+) ([]models.Guest, error) {
 	if order != "ASC" && order != "DESC" {
 		order = "ASC"
 	}
@@ -96,10 +102,10 @@ func (repo *Repository) GetTotalGuests(filters *GuestFilters) (int64, error) {
 	return totalRows, nil
 }
 
-func (repo *Repository) GetGuestsByPurchaseID(purchaseId uuid.UUID) ([]models.Guest, error) {
+func (repo *Repository) GetGuestsByPurchaseID(purchaseID uuid.UUID) ([]models.Guest, error) {
 	var guests []models.Guest
 
-	if err := repo.db.Preload("Guestlist").Where("purchase_id = ?", purchaseId).Find(&guests).Error; err != nil {
+	if err := repo.db.Preload("Guestlist").Where("purchase_id = ?", purchaseID).Find(&guests).Error; err != nil {
 		return nil, err
 	}
 
@@ -110,18 +116,25 @@ func (repo *Repository) GetGuestsByPurchaseID(purchaseId uuid.UUID) ([]models.Gu
 	return guests, nil
 }
 
-func (repo *Repository) GetUnattendedGuestsByProductID(productId int, q string) (models.GuestSummarySlice, error) {
+func (repo *Repository) GetUnattendedGuestsByProductID(productID int, q string) (models.GuestSummarySlice, error) {
 	var guests models.GuestSummarySlice
 
+	var filter GuestFilters
+
+	filter.NotPresent = true
+	if q != "" {
+		filter.Query = q
+	}
+
 	query := repo.db.Model(&models.Guest{}).
-		Select("Guests.id, Guests.name, Guests.code, Guestlists.name AS list_name, Guests.additional_guests, Guests.arrival_note").
+		Select("Guests.id, Guests.name, "+
+			"Guests.code, Guestlists.name AS list_name, "+
+			"Guests.additional_guests, Guests.arrival_note").
 		Joins("JOIN guestlists ON Guests.guestlist_id = Guestlists.id").
 		Joins("JOIN products ON Guestlists.product_id = Products.id").
-		Where("Products.id = ? AND Guests.attended_guests = ?", productId, 0).
+		Where("Products.id = ?", productID).
 		Order("guests.name ASC")
-	if q != "" {
-		query = query.Where("Guests.name LIKE ? OR Guests.code LIKE ?", "%"+q+"%", q+"%")
-	}
+	query = filter.AddWhere(query)
 
 	if err := query.Scan(&guests).Error; err != nil {
 		return nil, ErrGuestsNotFound
@@ -192,16 +205,14 @@ func (repo *Repository) CreateGuest(guest models.Guest) (models.Guest, error) {
 	return guest, result.Error
 }
 
-func (repo *Repository) DeleteGuest(guest models.Guest, deletedBy models.User) {
-	repo.db.Model(&models.Guest{}).Where(whereIDEquals, guest.ID).Update("DeletedByID", deletedBy.ID)
-
+func (repo *Repository) DeleteGuest(guest models.Guest) {
 	repo.db.Delete(&guest)
 }
 
-func (repo *Repository) RollbackVisitedGuestsByPurchaseID(purchaseId uuid.UUID) error {
+func (repo *Repository) RollbackVisitedGuestsByPurchaseID(purchaseID uuid.UUID) error {
 	err := repo.db.Model(&models.Guest{}).
-		Where("purchase_id = ?", purchaseId.String()).
-		Updates(map[string]interface{}{"purchase_id": nil, "attended_guests": 0, "arrived_at": nil}).
+		Where("purchase_id = ?", purchaseID.String()).
+		Updates(map[string]any{"purchase_id": nil, "attended_guests": 0, "arrived_at": nil}).
 		Error
 
 	return err

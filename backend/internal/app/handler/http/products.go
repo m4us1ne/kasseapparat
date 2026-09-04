@@ -12,24 +12,24 @@ import (
 )
 
 type ProductRequestCreate struct {
-	Name      string          `binding:"required"         form:"name"      json:"name"`
-	NetPrice  decimal.Decimal `binding:"required"         form:"netPrice"  json:"netPrice"`
-	VATRate   decimal.Decimal `binding:"required"         form:"vatRate"   json:"vatRate"`
-	WrapAfter bool            `form:"wrapAfter"           json:"wrapAfter"`
-	Pos       int             `binding:"numeric,required" form:"pos"       json:"pos"`
-	Hidden    bool            `binding:"boolean"          form:"hidden"    json:"hidden"`
+	Name      string          `json:"name"      form:"name"      binding:"required"`
+	NetPrice  decimal.Decimal `json:"netPrice"  form:"netPrice"  binding:"required"`
+	VATRate   decimal.Decimal `json:"vatRate"   form:"vatRate"   binding:"required"`
+	WrapAfter bool            `json:"wrapAfter" form:"wrapAfter"`
+	Pos       int             `json:"pos"       form:"pos"       binding:"numeric,required"`
+	Hidden    bool            `json:"hidden"    form:"hidden"    binding:"boolean"`
 }
 
 type ProductRequestUpdate struct {
-	Name       string          `binding:"required"         form:"name"       json:"name"`
-	NetPrice   decimal.Decimal `binding:"required"         form:"netPrice"   json:"netPrice"`
-	VATRate    decimal.Decimal `binding:"required"         form:"vatRate"    json:"vatRate"`
-	WrapAfter  bool            `form:"wrapAfter"           json:"wrapAfter"`
-	Pos        int             `binding:"numeric,required" form:"pos"        json:"pos"`
-	ApiExport  bool            `binding:"boolean"          form:"apiExport"  json:"apiExport"`
-	Hidden     bool            `binding:"boolean"          form:"hidden"     json:"hidden"`
-	SoldOut    bool            `binding:"boolean"          form:"soldOut"    json:"soldOut"`
-	TotalStock int             `binding:"numeric"          form:"totalStock" json:"totalStock"`
+	Name       string          `json:"name"       form:"name"       binding:"required"`
+	NetPrice   decimal.Decimal `json:"netPrice"   form:"netPrice"   binding:"required"`
+	VATRate    decimal.Decimal `json:"vatRate"    form:"vatRate"    binding:"required"`
+	WrapAfter  bool            `json:"wrapAfter"  form:"wrapAfter"`
+	Pos        int             `json:"pos"        form:"pos"        binding:"numeric,required"`
+	APIExport  bool            `json:"apiExport"  form:"apiExport"  binding:"boolean"`
+	Hidden     bool            `json:"hidden"     form:"hidden"     binding:"boolean"`
+	SoldOut    bool            `json:"soldOut"    form:"soldOut"    binding:"boolean"`
+	TotalStock int             `json:"totalStock" form:"totalStock" binding:"numeric"`
 }
 
 func (handler *Handler) GetProducts(c *gin.Context) {
@@ -85,8 +85,12 @@ func filterHiddenProducts(products []models.Product) []models.Product {
 	return filteredProducts
 }
 
-func createExtendedProductResponse(repo sqliteRepo.RepositoryInterface, products []models.Product, decimalPlaces int32) []response.ExtendedProductResponse {
-	var productsResponse = []response.ExtendedProductResponse{}
+func createExtendedProductResponse(
+	repo sqliteRepo.RepositoryInterface,
+	products []models.Product,
+	decimalPlaces int32,
+) []response.ExtendedProductResponse {
+	productsResponse := make([]response.ExtendedProductResponse, 0, len(products))
 
 	for _, product := range products {
 		unitsSold, _ := repo.GetPurchasedQuantitiesByProductID(product.ID)
@@ -129,12 +133,7 @@ func (handler *Handler) GetProductByID(c *gin.Context) {
 }
 
 func (handler *Handler) UpdateProductByID(c *gin.Context) {
-	executingUserObj, err := handler.getUserFromContext(c)
-	if err != nil {
-		_ = c.Error(UnableToRetrieveExecutingUser.WithCause(err))
-
-		return
-	}
+	c = handler.contextWithUser(c)
 
 	id, _ := strconv.Atoi(c.Param("id"))
 
@@ -157,9 +156,8 @@ func (handler *Handler) UpdateProductByID(c *gin.Context) {
 	product.VATRate = productRequest.VATRate
 	product.WrapAfter = productRequest.WrapAfter
 	product.Pos = productRequest.Pos
-	product.ApiExport = productRequest.ApiExport
+	product.APIExport = productRequest.APIExport
 	product.Hidden = productRequest.Hidden
-	product.UpdatedByID = &executingUserObj.ID
 	product.SoldOut = productRequest.SoldOut
 	product.TotalStock = productRequest.TotalStock
 
@@ -174,12 +172,7 @@ func (handler *Handler) UpdateProductByID(c *gin.Context) {
 }
 
 func (handler *Handler) CreateProduct(c *gin.Context) {
-	executingUserObj, err := handler.getUserFromContext(c)
-	if err != nil {
-		_ = c.Error(UnableToRetrieveExecutingUser.WithCause(err))
-
-		return
-	}
+	c = handler.contextWithUser(c)
 
 	var product models.Product
 
@@ -196,9 +189,8 @@ func (handler *Handler) CreateProduct(c *gin.Context) {
 	product.WrapAfter = productRequest.WrapAfter
 	product.Pos = productRequest.Pos
 	product.Hidden = productRequest.Hidden
-	product.CreatedByID = &executingUserObj.ID
 
-	product, err = handler.repo.CreateProduct(product)
+	product, err := handler.repo.CreateProduct(product)
 	if err != nil {
 		_ = c.Error(InternalServerError.WithCause(err))
 
@@ -209,12 +201,7 @@ func (handler *Handler) CreateProduct(c *gin.Context) {
 }
 
 func (handler *Handler) DeleteProductByID(c *gin.Context) {
-	executingUserObj, err := handler.getUserFromContext(c)
-	if err != nil {
-		_ = c.Error(UnableToRetrieveExecutingUser.WithCause(err))
-
-		return
-	}
+	c = handler.contextWithUser(c)
 
 	id, _ := strconv.Atoi(c.Param("id"))
 
@@ -225,13 +212,7 @@ func (handler *Handler) DeleteProductByID(c *gin.Context) {
 		return
 	}
 
-	if !executingUserObj.Admin {
-		_ = c.Error(Forbidden)
-
-		return
-	}
-
-	handler.repo.DeleteProduct(*product, *executingUserObj)
+	handler.repo.DeleteProduct(*product)
 
 	c.Status(http.StatusNoContent)
 }

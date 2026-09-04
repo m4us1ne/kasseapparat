@@ -1,0 +1,118 @@
+services:
+  # --------------------------------------------------------
+  # Traefik Reverse Proxy
+  # --------------------------------------------------------
+  traefik:
+    image: traefik:v3.7
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+      - "--providers.file.filename=/etc/traefik/dynamic.yaml"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./infra/.certs:/certs:ro
+      - ./infra/traefik-dynamic.yaml:/etc/traefik/dynamic.yaml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # --------------------------------------------------------
+  # Mail
+  # --------------------------------------------------------
+  mailhog:
+    image: mailhog/mailhog:latest
+    platform: linux/amd64
+    ports:
+      - "1025:1025"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.mailhog-kasse.rule=Host(`mail.kasseapparat.test`)"
+      - "traefik.http.routers.mailhog-kasse.entrypoints=websecure"
+      - "traefik.http.routers.mailhog-kasse.tls=true"
+      - "traefik.http.services.mailhog-kasse.loadbalancer.server.port=8025"
+
+  # --------------------------------------------------------
+  # Observability
+  # --------------------------------------------------------
+  openobserve:
+    image: public.ecr.aws/zinclabs/openobserve:latest
+    environment:
+      - ZO_ROOT_USER_EMAIL=admin@example.com
+      - ZO_ROOT_USER_PASSWORD=password123
+    volumes:
+      - o2_data:/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.observe-kasse.rule=Host(`observe.kasseapparat.test`)"
+      - "traefik.http.routers.observe-kasse.entrypoints=websecure"
+      - "traefik.http.routers.observe-kasse.tls=true"
+      - "traefik.http.services.observe-kasse.loadbalancer.server.port=5080"
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    volumes:
+      - ./infra/otel-config.yaml:/etc/otel/config.yaml
+      - ./backend/logs:/etc/app/logs:ro
+    command: ["--config=/etc/otel/config.yaml"]
+    ports:
+      - "3017:4317"
+      - "3018:4318"
+    depends_on:
+      - openobserve
+
+  # --------------------------------------------------------
+  # Identity
+  # --------------------------------------------------------
+  dex:
+    image: ghcr.io/dexidp/dex:v2.45.1
+    volumes:
+      - ./infra/dex-config.yaml:/etc/dex/config.docker.yaml
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dex-funk.rule=Host(`dex.kasseapparat.test`)"
+      - "traefik.http.routers.dex-funk.entrypoints=websecure"
+      - "traefik.http.routers.dex-funk.tls=true"
+      - "traefik.http.services.dex-funk.loadbalancer.server.port=5556"
+
+  minio:
+    image: minio/minio:latest
+    container_name: kasseapparat_minio
+    ports:
+      - "3050:9000"
+    environment:
+      - MINIO_ROOT_USER=local-admin
+      - MINIO_ROOT_PASSWORD=local-super-secret
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.minio-kasse.rule=Host(`minio.kasseapparat.test`)"
+      - "traefik.http.routers.minio-kasse.entrypoints=websecure"
+      - "traefik.http.routers.minio-kasse.tls=true"
+      - "traefik.http.services.minio-kasse.loadbalancer.server.port=9001"
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: kasseapparat_minio_init
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until (/usr/bin/mc alias set local_minio http://kasseapparat_minio:9000 local-admin local-super-secret) do echo 'Waiting for MinIO...' && sleep 1; done;
+      /usr/bin/mc mb --ignore-existing local_minio/kasseapparat-exports;
+      /usr/bin/mc anonymous set download local_minio/kasseapparat-exports;
+      exit 0;
+      "
+
+volumes:
+  o2_data:
+  minio_data:

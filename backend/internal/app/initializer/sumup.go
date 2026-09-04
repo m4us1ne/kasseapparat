@@ -1,6 +1,7 @@
 package initializer
 
 import (
+	"strings"
 	"sync"
 
 	"github.com/potibm/kasseapparat/internal/app/config"
@@ -14,27 +15,39 @@ var (
 	once     sync.Once
 )
 
+func buildWebhookURL(publicURL string) *string {
+	if trimmed := strings.TrimRight(publicURL, "/"); trimmed != "" {
+		url := trimmed + "/api/" + APIVersion + "/sumup/webhook"
+
+		return &url
+	}
+
+	return nil
+}
+
 func InitializeSumup(sumupConfig config.SumupConfig) *sumupService.Service {
 	once.Do(func() {
-		apiKey := sumupConfig.ApiKey
+		apiKey := sumupConfig.APIKey
 		merchantCode := sumupConfig.MerchantCode
 		paymentCurrency := sumupConfig.CurrencyCode
 		paymentMinorUnit := sumupConfig.CurrencyMinorUnit
 		affiliateKey := sumupConfig.AffiliateKey
-		applicationId := sumupConfig.ApplicationId
+		applicationID := sumupConfig.ApplicationID
 
-		var webhookUrl *string
-
-		publicUrl := sumupConfig.PublicUrl
-		if publicUrl != "" {
-			webhookUrl = &publicUrl
-			*webhookUrl += "/api/sumup/webhook"
-		}
+		webhookURL := buildWebhookURL(sumupConfig.PublicURL)
 
 		clientOptions := client.WithAPIKey(apiKey)
-		client := sumup.NewClient(clientOptions)
+		clnt := sumup.NewClient(clientOptions)
 
-		instance = sumupService.NewService(client, merchantCode, applicationId, affiliateKey, paymentCurrency, uint(paymentMinorUnit), webhookUrl)
+		instance = sumupService.NewService(
+			clnt,
+			merchantCode,
+			applicationID,
+			affiliateKey,
+			paymentCurrency,
+			paymentMinorUnit,
+			webhookURL,
+		)
 	})
 
 	return instance

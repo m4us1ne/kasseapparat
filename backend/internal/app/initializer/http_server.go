@@ -1,13 +1,14 @@
+//nolint:gocritic // unnecessary blocks are more readable with the grouping of routes
 package initializer
 
 import (
+	"context"
 	"embed"
-	"log"
+	"fmt"
+	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 
-	jwt "github.com/appleboy/gin-jwt/v2"
 	"github.com/getsentry/sentry-go"
 	sentrygin "github.com/getsentry/sentry-go/gin"
 	"github.com/gin-contrib/cors"
@@ -17,35 +18,48 @@ import (
 	httpHandler "github.com/potibm/kasseapparat/internal/app/handler/http"
 	"github.com/potibm/kasseapparat/internal/app/handler/websocket"
 	"github.com/potibm/kasseapparat/internal/app/middleware"
-	"github.com/potibm/kasseapparat/internal/app/models"
 	sqliteRepo "github.com/potibm/kasseapparat/internal/app/repository/sqlite"
+	sloggin "github.com/samber/slog-gin"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 )
 
-var (
-	r *gin.Engine
-)
+var r *gin.Engine
 
-func InitializeHttpServer(httpHandler httpHandler.Handler, websocketHandler websocket.HandlerInterface, repository sqliteRepo.Repository, staticFiles embed.FS, jwtMiddleware *jwt.GinJWTMiddleware, config config.Config) *gin.Engine {
-	gin.SetMode(config.AppConfig.GinMode)
-	r = gin.Default()
-	r.Use(sentrygin.New(sentrygin.Options{
-		Repanic: false,
-	}))
-	r.Use(middleware.ErrorHandlingMiddleware())
+const APIVersion = "v3"
 
-	r.GET("/api/v2/purchases/stats", httpHandler.GetPurchaseStats)
+func InitializeHTTPServer(
+	httpHdlr httpHandler.Handler,
+	websocketHdlr websocket.TransactionWebSocketHandler,
+	repository sqliteRepo.Repository,
+	staticFiles embed.FS,
+	cfg config.Config,
+	logger *slog.Logger,
+) (*gin.Engine, error) {
+	gin.SetMode(cfg.App.GinMode)
 
-	r.Use(CreateCorsMiddleware(config.CorsAllowOrigins))
+	r = gin.New()
+	r.Use(
+		middleware.ErrorHandlingMiddleware(),
+		gin.Recovery(),
+		sentrygin.New(sentrygin.Options{
+			Repanic: false,
+		}),
+		sloggin.New(logger),
+		otelgin.Middleware(config.OtelBackendServiceName),
+	)
+
+	r.GET("/api/"+APIVersion+"/purchases/stats", httpHdlr.GetPurchaseStats)
+
+	r.Use(CreateCorsMiddleware(cfg.App.CorsAllowOrigins))
 
 	folder, err := static.EmbedFolder(staticFiles, "assets")
 	if err != nil {
-		log.Fatalf("Failed to create embedded folder: %v", err)
+		return nil, fmt.Errorf("create embedded folder: %w", err)
 	}
 
 	r.Use(static.Serve("/", folder))
 
-	registerAuthMiddleware(jwtMiddleware)
-	registerApiRoutes(httpHandler, websocketHandler, jwtMiddleware)
+	registerAPIRoutes(httpHdlr, websocketHdlr, cfg)
 
 	r.NoRoute(func(c *gin.Context) {
 		if !strings.HasPrefix(c.Request.RequestURI, "/api") && !strings.Contains(c.Request.RequestURI, ".") {
@@ -58,7 +72,37 @@ func InitializeHttpServer(httpHandler httpHandler.Handler, websocketHandler webs
 		}
 	})
 
-	return r
+	return r, nil
+}
+
+func InitializeOIDCHandler(ctx context.Context, cfg config.Config) (*httpHandler.OIDCAuthHandler, error) {
+	if cfg.Auth.Mode != "oidc" {
+		return nil, nil
+	}
+
+	if cfg.Auth.OidcAdminGroup == "" {
+		slog.Warn(
+			"OIDC admin group not configured - no users will have admin privileges. " +
+				"Set auth.oidc_admin_group to enable admin access.",
+		)
+	}
+
+	opts := httpHandler.OIDCOptions{
+		Issuer:          cfg.Auth.OidcIssuer,
+		ClientID:        cfg.Auth.OidcClientID,
+		ClientSecret:    cfg.Auth.OidcClientSecret,
+		CallbackURL:     strings.TrimSuffix(cfg.App.FrontendURL, "/") + "/api/" + APIVersion + "/auth/callback",
+		AdminGroup:      cfg.Auth.OidcAdminGroup,
+		FrontendURL:     cfg.App.FrontendURL,
+		SessionSecret:   cfg.Auth.SessionSecret,
+		SessionDuration: cfg.Auth.SessionDuration,
+		IsProduction:    cfg.App.Environment == "production",
+	}
+
+	return httpHandler.NewOIDCAuthHandler(
+		ctx,
+		opts,
+	)
 }
 
 func CreateCorsMiddleware(allowedOrigins []string) gin.HandlerFunc {
@@ -72,20 +116,29 @@ func CreateCorsMiddleware(allowedOrigins []string) gin.HandlerFunc {
 	return cors.New(corsConfig)
 }
 
-func registerAuthMiddleware(authMiddleware *jwt.GinJWTMiddleware) {
-	r.Use(middleware.HandlerMiddleWare(authMiddleware))
+func SlogUserID() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		username, exists := c.Get(middleware.IdentityKey)
+		if exists {
+			if usernameStr, ok := username.(string); ok {
+				sloggin.AddCustomAttributes(c,
+					slog.String("username", usernameStr),
+				)
+			}
+		}
 
-	middleware.RegisterRoute(r, authMiddleware)
+		c.Next()
+	}
 }
 
 func SentryMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		user, exists := c.Get(middleware.IdentityKey)
+		username, exists := c.Get(middleware.IdentityKey)
 		if exists {
-			if user, ok := user.(*models.User); ok {
+			if usernameStr, ok := username.(string); ok {
 				sentry.ConfigureScope(func(scope *sentry.Scope) {
 					scope.SetUser(sentry.User{
-						ID: strconv.Itoa(int(user.ID)),
+						Username: usernameStr,
 					})
 				})
 			}
@@ -95,36 +148,57 @@ func SentryMiddleware() gin.HandlerFunc {
 	}
 }
 
-func registerApiRoutes(httpHandler httpHandler.Handler, websockeHandler websocket.HandlerInterface, authMiddleware *jwt.GinJWTMiddleware) {
-	protectedApiRouter := r.Group("/api/v2")
-	protectedApiRouter.Use(authMiddleware.MiddlewareFunc(), SentryMiddleware())
+func registerAPIRoutes(
+	httpHdlr httpHandler.Handler,
+	websocketHdlr websocket.TransactionWebSocketHandler,
+	cfg config.Config,
+) {
+	protectedAPIRouter := r.Group("/api/" + APIVersion)
+	protectedAPIRouter.Use(middleware.HandlerMiddleWare(cfg), SentryMiddleware(), SlogUserID())
 	{
-		registerProductRoutes(protectedApiRouter, httpHandler)
-		registerProductInterestRoutes(protectedApiRouter, httpHandler)
-		protectedApiRouter.GET("/productStats", httpHandler.GetProductStats)
+		protectedAPIRouter.GET("/auth/me", httpHdlr.GetMe)
 
-		registerGuestlistRoutes(protectedApiRouter, httpHandler)
-		registerGuestRoutes(protectedApiRouter, httpHandler)
-		protectedApiRouter.POST("/guestsUpload", httpHandler.ImportGuestsFromDeineTicketsCsv)
+		registerProductRoutes(protectedAPIRouter, httpHdlr)
+		registerProductInterestRoutes(protectedAPIRouter, httpHdlr)
+		protectedAPIRouter.GET("/productStats", httpHdlr.GetProductStats)
+		protectedAPIRouter.GET("/paymentMethodStats", httpHdlr.GetPaymentMethodStats)
+		protectedAPIRouter.GET("/hourlyRevenueStats", httpHdlr.GetHourlyRevenueStats)
+		protectedAPIRouter.GET("/hourlyQuantityStats", httpHdlr.GetHourlyQuantityStats)
 
-		registerPurchaseRoutes(protectedApiRouter, httpHandler, websockeHandler)
-		registerUserRoutes(protectedApiRouter, httpHandler)
+		registerGuestlistRoutes(protectedAPIRouter, httpHdlr)
+		registerGuestRoutes(protectedAPIRouter, httpHdlr)
+		protectedAPIRouter.POST("/guestsUpload", httpHdlr.ImportGuestsFromDeineTicketsCsv)
 
-		registerSumupReadersRoutes(protectedApiRouter, httpHandler)
-		registerSumupTransactionRoutes(protectedApiRouter, httpHandler)
+		registerPurchaseRoutes(protectedAPIRouter, httpHdlr)
+
+		registerSumupReadersRoutes(protectedAPIRouter, httpHdlr)
+		registerSumupTransactionRoutes(protectedAPIRouter, httpHdlr)
 	}
 
 	// unprotected routes
-	unprotectedApiRouter := r.Group("/api/v2")
+	unprotectedAPIRouter := r.Group("/api/" + APIVersion)
 	{
-		unprotectedApiRouter.GET("/config", httpHandler.GetConfig)
+		unprotectedAPIRouter.GET("/config", httpHdlr.GetConfig)
 
-		unprotectedApiRouter.POST("/auth/changePasswordToken", httpHandler.RequestChangePasswordToken)
-		unprotectedApiRouter.POST("/auth/changePassword", httpHandler.UpdateUserPassword)
+		unprotectedAPIRouter.POST("/sumup/webhook", httpHdlr.GetSumupTransactionWebhook)
 
-		unprotectedApiRouter.POST("/sumup/webhook", httpHandler.GetSumupTransactionWebhook)
+		unprotectedAPIRouter.GET("/purchases/:id/ws", websocketHdlr.HandleTransactionWebSocket)
 
-		unprotectedApiRouter.GET("/purchases/:id/ws", websockeHandler.HandleTransactionWebSocket)
+		if cfg.Auth.Mode == "oidc" {
+			oidcHandler := httpHdlr.GetOIDCHandler()
+			if oidcHandler != nil {
+				unprotectedAPIRouter.GET("/auth/login", oidcHandler.Login)
+				unprotectedAPIRouter.GET("/auth/callback", oidcHandler.Callback)
+				unprotectedAPIRouter.POST("/auth/logout", oidcHandler.Logout)
+			}
+		} else {
+			unprotectedAPIRouter.GET("/auth/login", func(c *gin.Context) {
+				c.Redirect(http.StatusFound, "/")
+			})
+			unprotectedAPIRouter.POST("/auth/logout", func(c *gin.Context) {
+				c.JSON(http.StatusOK, gin.H{"message": "logged out (proxy mode)"})
+			})
+		}
 	}
 }
 
@@ -162,7 +236,10 @@ func registerGuestRoutes(rg *gin.RouterGroup, handler httpHandler.Handler) {
 	}
 }
 
-func registerPurchaseRoutes(rg *gin.RouterGroup, handler httpHandler.Handler, websockeHandler websocket.HandlerInterface) {
+func registerPurchaseRoutes(
+	rg *gin.RouterGroup,
+	handler httpHandler.Handler,
+) {
 	purchases := rg.Group("/purchases")
 	{
 		purchases.GET("", handler.GetPurchases)
@@ -171,17 +248,6 @@ func registerPurchaseRoutes(rg *gin.RouterGroup, handler httpHandler.Handler, we
 		purchases.DELETE("/:id", handler.DeletePurchase)
 		purchases.GET("/export", handler.ExportPurchases)
 		purchases.POST("/:id/refund", handler.RefundPurchase)
-	}
-}
-
-func registerUserRoutes(rg *gin.RouterGroup, handler httpHandler.Handler) {
-	users := rg.Group("/users")
-	{
-		users.GET("", handler.GetUsers)
-		users.GET("/:id", handler.GetUserByID)
-		users.PUT("/:id", handler.UpdateUserByID)
-		users.DELETE("/:id", handler.DeleteUserByID)
-		users.POST("", handler.CreateUser)
 	}
 }
 
@@ -203,6 +269,7 @@ func registerSumupReadersRoutes(rg *gin.RouterGroup, handler httpHandler.Handler
 		sumupReaders.POST("", handler.CreateSumupReader)
 	}
 }
+
 func registerSumupTransactionRoutes(rg *gin.RouterGroup, handler httpHandler.Handler) {
 	sumupTransactions := rg.Group("/sumup/transactions")
 	{

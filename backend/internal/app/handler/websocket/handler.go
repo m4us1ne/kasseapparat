@@ -1,10 +1,10 @@
 package websocket
 
 import (
-	"log"
+	"fmt"
+	"log/slog"
 	"net/http"
 
-	jwt "github.com/appleboy/gin-jwt/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -18,9 +18,9 @@ type StatusPublisher interface {
 	PushUpdate(purchaseID uuid.UUID, status models.PurchaseStatus)
 }
 
-var _ HandlerInterface = (*Handler)(nil)
+var _ TransactionWebSocketHandler = (*Handler)(nil)
 
-type HandlerInterface interface {
+type TransactionWebSocketHandler interface {
 	HandleTransactionWebSocket(c *gin.Context)
 }
 
@@ -32,22 +32,31 @@ func (w *WebsocketPublisher) PushUpdate(purchaseID uuid.UUID, status models.Purc
 
 type Handler struct {
 	sumupRepository  sumupRepo.RepositoryInterface
-	sqliteRepository sqliteRepository
+	sqliteRepository PurchaseGetter
 	purchaseService  purchaseService.Service
 	upgrader         websocket.Upgrader
-	jwtMiddleware    *jwt.GinJWTMiddleware
 }
 
-type sqliteRepository interface {
+type PurchaseGetter interface {
 	GetPurchaseByID(id uuid.UUID) (*models.Purchase, error)
 }
 
-func NewHandler(sqliteRepository sqliteRepository, sumupRepository sumupRepo.RepositoryInterface, purchaseService purchaseService.Service, jwtMiddleware *jwt.GinJWTMiddleware, corsAllowOrigins *config.CorsAllowOriginsConfig) *Handler {
+func NewHandler(
+	sqliteRepository PurchaseGetter,
+	sumupRepository sumupRepo.RepositoryInterface,
+	purchaseSvc purchaseService.Service,
+	corsAllowOrigins *config.CorsAllowOriginsConfig,
+) *Handler {
 	upgrader := websocket.Upgrader{
 		CheckOrigin: makeCheckOrigin(corsAllowOrigins),
 	}
 
-	return &Handler{sqliteRepository: sqliteRepository, sumupRepository: sumupRepository, purchaseService: purchaseService, upgrader: upgrader, jwtMiddleware: jwtMiddleware}
+	return &Handler{
+		sqliteRepository: sqliteRepository,
+		sumupRepository:  sumupRepository,
+		purchaseService:  purchaseSvc,
+		upgrader:         upgrader,
+	}
 }
 
 func makeCheckOrigin(allowedOrigins *config.CorsAllowOriginsConfig) func(r *http.Request) bool {
@@ -60,14 +69,14 @@ func makeCheckOrigin(allowedOrigins *config.CorsAllowOriginsConfig) func(r *http
 		origin := r.Header.Get("Origin")
 
 		if origin == "" {
-			log.Printf("WebSocket connection attempt failed: missing origin header")
+			slog.Warn("WebSocket connection attempt failed: missing origin header")
 
 			return false
 		}
 
 		_, ok := allowed[origin]
 		if !ok {
-			log.Printf("WebSocket connection attempt failed: origin not allowed: %s", origin)
+			slog.Warn("WebSocket connection attempt failed: origin not allowed", "origin", fmt.Sprintf("%q", origin))
 		}
 
 		return ok

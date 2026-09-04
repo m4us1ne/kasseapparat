@@ -17,7 +17,13 @@ var productSortFieldMappings = map[string]string{
 	"pos":        "Pos",
 }
 
-func (repo *Repository) GetProducts(limit int, offset int, sort string, order string, ids []int) ([]models.Product, error) {
+func (repo *Repository) GetProducts(
+	limit int,
+	offset int,
+	sort string,
+	order string,
+	ids []int,
+) ([]models.Product, error) {
 	if order != "ASC" && order != "DESC" {
 		order = "ASC"
 	}
@@ -29,7 +35,11 @@ func (repo *Repository) GetProducts(limit int, offset int, sort string, order st
 
 	var products []models.Product
 
-	query := repo.db.Table("Products").Preload("Guestlists").Order(sortField + " " + order + ", Pos ASC, Id ASC").Limit(limit).Offset(offset)
+	query := repo.db.Table("Products").
+		Preload("Guestlists").
+		Order(sortField + " " + order + ", Pos ASC, Id ASC").
+		Limit(limit).
+		Offset(offset)
 
 	if len(ids) > 0 {
 		query = query.Where("Id IN ?", ids)
@@ -79,8 +89,7 @@ func (repo *Repository) UpdateProductByID(id int, updatedProduct models.Product)
 	product.NetPrice = updatedProduct.NetPrice
 	product.VATRate = updatedProduct.VATRate
 	product.WrapAfter = updatedProduct.WrapAfter
-	product.ApiExport = updatedProduct.ApiExport
-	product.UpdatedByID = updatedProduct.UpdatedByID
+	product.APIExport = updatedProduct.APIExport
 	product.Hidden = updatedProduct.Hidden
 	product.SoldOut = updatedProduct.SoldOut
 	product.TotalStock = updatedProduct.TotalStock
@@ -99,20 +108,23 @@ func (repo *Repository) CreateProduct(product models.Product) (models.Product, e
 	return product, result.Error
 }
 
-func (repo *Repository) DeleteProduct(product models.Product, deletedBy models.User) {
-	repo.db.Model(&models.Product{}).Where(whereIDEquals, product.ID).Update("DeletedByID", deletedBy.ID)
-
+func (repo *Repository) DeleteProduct(product models.Product) {
 	repo.db.Delete(&product)
 }
 
-func (repo *Repository) GetAttendedGuestSumByProductID(productID uint) (int, error) {
+func (repo *Repository) GetAttendedGuestSumByProductID(productID int) (int, error) {
 	var sum sql.NullInt64
 
 	err := repo.db.
 		Model(&models.Guest{}).
 		Select("SUM(guests.attended_guests)").
-		Joins("JOIN guestlists ON guests.guestlist_id = guestlists.id AND guestlists.product_id = ?", productID).
-		Joins("JOIN purchases ON guests.purchase_id = purchases.id AND purchases.deleted_at IS NULL AND purchases.status = ?", models.PurchaseStatusConfirmed).
+		Joins("JOIN guestlists ON "+
+			"guests.guestlist_id = guestlists.id AND "+
+			"guestlists.product_id = ?", productID).
+		Joins("JOIN purchases ON "+
+			"guests.purchase_id = purchases.id AND "+
+			"purchases.deleted_at IS NULL AND "+
+			"purchases.status = ?", models.PurchaseStatusConfirmed).
 		Where("guests.deleted_at IS NULL").
 		Scan(&sum).Error
 	if err != nil {

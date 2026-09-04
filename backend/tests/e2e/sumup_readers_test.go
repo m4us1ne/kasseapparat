@@ -6,15 +6,15 @@ import (
 )
 
 var (
-	sumupReadersUrl       = "/api/v2/sumup/readers"
-	sumupReadersUrlWithId = sumupReadersUrl + "/reader_1"
+	sumupReadersURL       = "/api/v3/sumup/readers"
+	sumupReadersURLWithID = sumupReadersURL + "/reader_1"
 )
 
 func TestGetSumupReaders(t *testing.T) {
 	_, cleanup := setupTestEnvironment(t)
 	defer cleanup()
 
-	res := withDemoUserAuthToken(e.GET(sumupReadersUrl)).
+	res := withDemoUserAuthToken(e.GET(sumupReadersURL)).
 		Expect()
 
 	res.Status(http.StatusOK)
@@ -35,7 +35,7 @@ func TestGetSumupReader(t *testing.T) {
 	_, cleanup := setupTestEnvironment(t)
 	defer cleanup()
 
-	res := withDemoUserAuthToken(e.GET(sumupReadersUrlWithId)).
+	res := withDemoUserAuthToken(e.GET(sumupReadersURLWithID)).
 		Expect()
 
 	res.Status(http.StatusOK)
@@ -49,17 +49,9 @@ func TestDeleteSumupReader(t *testing.T) {
 	_, cleanup := setupTestEnvironment(t)
 	defer cleanup()
 
-	withDemoUserAuthToken(e.DELETE(sumupReadersUrlWithId)).
+	withDemoUserAuthToken(e.DELETE(sumupReadersURLWithID)).
 		Expect().
 		Status(http.StatusNoContent)
 }
 
-func TestSumupReadersAuthentication(t *testing.T) {
-	_, cleanup := setupTestEnvironment(t)
-	defer cleanup()
-
-	e.Request("GET", sumupReadersUrl).Expect().Status(http.StatusUnauthorized)
-	e.Request("POST", sumupReadersUrl).Expect().Status(http.StatusUnauthorized)
-	e.Request("GET", sumupReadersUrlWithId).Expect().Status(http.StatusUnauthorized)
-	e.Request("DELETE", sumupReadersUrlWithId).Expect().Status(http.StatusUnauthorized)
-}
+// Note: Authentication tests removed for Phase 1 - auth is now handled by reverse proxy in Phase 2

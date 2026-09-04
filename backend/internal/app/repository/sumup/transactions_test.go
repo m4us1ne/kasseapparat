@@ -6,12 +6,14 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
-	"github.com/sumup/sumup-go/shared"
-	"github.com/sumup/sumup-go/transactions"
+	sumup "github.com/sumup/sumup-go"
 )
 
 func TestParseHrefToListTransactionsParams(t *testing.T) {
-	href := "limit=1&oldest_ref=0dd170c7-d82a-4fec-b2c0-e6de01c631a8&order=ascending&skip_tx_result=true&changes_since=2024-01-01T12%3A00%3A00Z&users=test1%40example.com&users=test2%40example.com"
+	href := "limit=1&oldest_ref=0dd170c7-d82a-4fec-b2c0-e6de01c631a8&" +
+		"order=ascending&skip_tx_result=true&" +
+		"changes_since=2024-01-01T12%3A00%3A00Z&users=test1%40example.com&" +
+		"users=test2%40example.com"
 
 	params, err := parseHrefToListTransactionsParams(href)
 	assert.NoError(t, err)
@@ -24,7 +26,7 @@ func TestParseHrefToListTransactionsParams(t *testing.T) {
 	assert.Equal(t, "0dd170c7-d82a-4fec-b2c0-e6de01c631a8", *params.OldestRef)
 
 	assert.NotNil(t, params.Order)
-	assert.Equal(t, "ascending", *params.Order)
+	assert.Equal(t, sumup.TransactionsListOrder("ascending"), *params.Order)
 
 	assert.NotNil(t, params.ChangesSince)
 
@@ -32,7 +34,7 @@ func TestParseHrefToListTransactionsParams(t *testing.T) {
 	assert.True(t, params.ChangesSince.Equal(expectedTime))
 
 	assert.NotNil(t, params.Users)
-	assert.Equal(t, []string{"test1@example.com", "test2@example.com"}, *params.Users)
+	assert.Equal(t, []string{"test1@example.com", "test2@example.com"}, params.Users)
 
 	// real world example
 	href = "limit=1&oldest_ref=0dd170c7-d82a-4fec-b2c0-e6de01c631a8&order=ascending&skip_tx_result=true"
@@ -44,51 +46,47 @@ func TestParseHrefToListTransactionsParams(t *testing.T) {
 	assert.NotNil(t, params.OldestRef)
 	assert.Equal(t, "0dd170c7-d82a-4fec-b2c0-e6de01c631a8", *params.OldestRef)
 	assert.NotNil(t, params.Order)
-	assert.Equal(t, "ascending", *params.Order)
+	assert.Equal(t, sumup.TransactionsListOrder("ascending"), *params.Order)
 	assert.Nil(t, params.ChangesSince)
-	assert.Nil(t, params.Users)
+	assert.Empty(t, params.Users)
 	assert.Nil(t, params.NewestRef)
 	assert.Nil(t, params.TransactionCode)
 	assert.Nil(t, params.OldestTime)
 	assert.Nil(t, params.NewestTime)
-	assert.Nil(t, params.Statuses)
-	assert.Nil(t, params.Types)
+	assert.Equal(t, len(params.Statuses), 0)
+	assert.Equal(t, len(params.Types), 0)
 }
 
 func TestFindNextHref(t *testing.T) {
-	links := []transactions.Link{
-		{Rel: nil, Href: nil},
-		{Rel: nil, Href: nil},
-		{Rel: nil, Href: nil},
-	}
+	links := []sumup.TransactionsHistoryLink{}
 
-	nextHref := findNextHref(&links)
+	nextHref := findNextHref(links)
 	assert.Equal(t, "", nextHref)
 
-	links = []transactions.Link{
-		{Rel: nil, Href: nil},
-		{Rel: &[]string{"next"}[0], Href: &[]string{"https://example.com/next"}[0]},
+	links = []sumup.TransactionsHistoryLink{
+		{Rel: "other", Href: "https://example.com/other"},
+		{Rel: "next", Href: "https://example.com/next"},
 	}
 
-	nextHref = findNextHref(&links)
+	nextHref = findNextHref(links)
 	assert.Equal(t, "https://example.com/next", nextHref)
 }
 
 func TestFromSDKTransactionWithUUIDId(t *testing.T) {
 	id := "2b5cd782-0733-4fb2-bf22-5a12345bd94f"
-	tid := shared.TransactionId(id)
+	tid := sumup.TransactionID(id)
 	tc := "TAAAABCP2SA"
-	amount := 40.0
-	currency := shared.Currency("EUR")
-	cardType := transactions.TransactionHistoryCardType("MASTERCARD")
-	status := transactions.TransactionHistoryStatus("SUCCESSFUL")
+	amount := float32(40.0)
+	currency := sumup.CurrencyEUR
+	cardType := sumup.CardTypeMastercard
+	status := sumup.TransactionStatusSuccessful
 
 	timestamp := parseTime(t, "2025-06-15T20:45:27.588Z")
 
-	sdk := &transactions.TransactionHistory{
-		Id:              &id,
+	sdk := &sumup.TransactionHistory{
+		ID:              &id,
 		TransactionCode: &tc,
-		TransactionId:   &tid,
+		TransactionID:   &tid,
 		Amount:          &amount,
 		Currency:        &currency,
 		CardType:        &cardType,
@@ -110,17 +108,17 @@ func TestFromSDKTransactionWithUUIDId(t *testing.T) {
 func TestFromSDKTransactionWithNonUUIDId(t *testing.T) {
 	id := "8119994131" // not a UUID
 	tc := "TAAAABCP2SA"
-	tid := shared.TransactionId("2b5cd782-0733-4fb2-bf22-5a12345bd94f")
-	amount := 40.0
-	currency := shared.Currency("EUR")
-	cardType := transactions.TransactionHistoryCardType("MASTERCARD")
-	status := transactions.TransactionHistoryStatus("REFUNDED")
+	tid := sumup.TransactionID("2b5cd782-0733-4fb2-bf22-5a12345bd94f")
+	amount := float32(40.0)
+	currency := sumup.CurrencyEUR
+	cardType := sumup.CardTypeMastercard
+	status := sumup.TransactionStatusRefunded
 	timestamp := parseTime(t, "2025-06-15T21:00:13.536Z")
 
-	sdk := &transactions.TransactionHistory{
-		Id:              &id,
+	sdk := &sumup.TransactionHistory{
+		ID:              &id,
 		TransactionCode: &tc,
-		TransactionId:   &tid,
+		TransactionID:   &tid,
 		Amount:          &amount,
 		Currency:        &currency,
 		CardType:        &cardType,

@@ -1,7 +1,6 @@
 package tests_e2e
 
 import (
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,9 +10,9 @@ import (
 )
 
 var (
-	guestsImportUrl       = "/api/v2/guestsUpload"
+	guestsImportURL       = "/api/v3/guestsUpload"
 	guestsImportCsvHeader = "Code;LastName;FirstName;Subject;Blocked;Notiz;\n"
-	deineTicketProductId  = 4
+	deineTicketProductID  = 4
 )
 
 func TestGuestImport(t *testing.T) {
@@ -38,7 +37,7 @@ func TestGuestImportWithoutFile(t *testing.T) {
 	_, cleanup := setupTestEnvironment(t)
 	defer cleanup()
 
-	withDemoUserAuthToken(e.POST(guestsImportUrl)).
+	withDemoUserAuthToken(e.POST(guestsImportURL)).
 		Expect().
 		Status(http.StatusBadRequest)
 }
@@ -94,20 +93,19 @@ func TestGuestImportWithWarningMessages(t *testing.T) {
 }
 
 func deleteGuestsByNameQuery(query string) {
-	guestsUrl := productBaseUrl + "/" + strconv.Itoa(deineTicketProductId) + "/guests"
-	guests := withDemoUserAuthToken(e.GET(guestsUrl)).
+	guestsURL := productBaseURL + "/" + strconv.Itoa(deineTicketProductID) + "/guests"
+	guests := withDemoUserAuthToken(e.GET(guestsURL)).
 		WithQuery("q", query).
 		Expect().
 		Status(http.StatusOK).JSON().Array()
 
 	for i := range len(guests.Iter()) {
 		guest := guests.Value(i).Object()
-		guestId := guest.Value("id").Number().Raw()
-		log.Println("Deleting guest with id", guestId)
+		guestID := guest.Value("id").Number().Raw()
 
-		withDemoUserAuthToken(e.DELETE(guestBaseUrl + "/" + strconv.Itoa(int(guestId)))).
+		withDemoUserAuthToken(e.DELETE(guestBaseURL + "/" + strconv.Itoa(int(guestID)))).
 			Expect().
-			Status(http.StatusOK)
+			Status(http.StatusNoContent)
 	}
 }
 
@@ -115,15 +113,45 @@ func uploadGuestImport(fileContent string) *httpexpect.Response {
 	reader := strings.NewReader(fileContent)
 
 	// Create a list entry import
-	return withDemoUserAuthToken(e.POST(guestsImportUrl)).
+	return withDemoUserAuthToken(e.POST(guestsImportURL)).
 		WithMultipart().
 		WithFile("file", "import.csv", reader).
 		Expect()
 }
 
-func TestGuestsImportAuthentication(t *testing.T) {
+func TestGuestImportWithUTF8BOM(t *testing.T) {
 	_, cleanup := setupTestEnvironment(t)
 	defer cleanup()
 
-	e.Request("POST", guestsImportUrl).Expect().Status(http.StatusUnauthorized)
+	fileContent := "\xef\xbb\xbf" + guestsImportCsvHeader +
+		"BOM123456;XYZTEST BOMLast;BOMFirst;EV123;;T-shirt size XL;\n"
+
+	guestImportResponse := uploadGuestImport(fileContent).
+		Status(http.StatusOK).
+		JSON().
+		Object()
+
+	guestImportResponse.Value("createdGuests").Number().IsEqual(1)
+	guestImportResponse.Value("warnings").Array().IsEmpty()
+
+	deleteGuestsByNameQuery("XYZTEST BOMLast")
+}
+
+func TestGuestImportWithSmallFile(t *testing.T) {
+	_, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	fileContent := "ab"
+
+	guestImportResponse := uploadGuestImport(fileContent).
+		Status(http.StatusOK).
+		JSON().
+		Object()
+
+	guestImportResponse.Value("createdGuests").Number().IsEqual(0)
+	guestImportResponse.Value("warnings").Array().IsEmpty()
+}
+
+func TestGuestsImportAuthentication(t *testing.T) {
+	// Note: Authentication tests removed for Phase 1 - auth is now handled by reverse proxy in Phase 2
 }

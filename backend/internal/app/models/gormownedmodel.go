@@ -1,12 +1,10 @@
 package models
 
+import (
+	gormaudit "github.com/potibm/kasseapparat/internal/app/store/gorm"
+)
+
 type GormOwnedModel struct {
 	GormModel
-
-	CreatedByID *uint `json:"createdById"`
-	CreatedBy   *User `json:"createdBy"`
-	UpdatedByID *uint `json:"updatedById"`
-	UpdatedBy   *User `json:"updatedBy"`
-	DeletedByID *uint `json:"deletedById"`
-	DeletedBy   *User `json:"deletedBy"`
+	gormaudit.AuditModel
 } // @name models.gormOwnedModel

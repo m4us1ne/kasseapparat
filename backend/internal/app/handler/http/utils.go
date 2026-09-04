@@ -2,7 +2,7 @@ package http
 
 import (
 	"errors"
-	"log"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -21,7 +21,7 @@ func queryArrayInt(c *gin.Context, field string) []int {
 	for _, s := range idStrings {
 		id, err := strconv.Atoi(s)
 		if err != nil {
-			log.Printf("Error converting %s to int: %v", s, err)
+			slog.WarnContext(c.Request.Context(), "Error converting string to int", "value", s, "error", err)
 
 			continue // skip invalid integers
 		}
@@ -63,14 +63,18 @@ func queryTime(c *gin.Context, field string, defaultValue *time.Time) *time.Time
 	}
 }
 
-func queryPaymentMethods(c *gin.Context, field string, validPaymentMethods config.PaymentMethods) []models.PaymentMethod {
+func queryPaymentMethods(
+	c *gin.Context,
+	field string,
+	validPaymentMethods config.PaymentMethods,
+) []models.PaymentMethod {
 	paymentMethods := c.DefaultQuery(field, "")
 
 	result := make([]models.PaymentMethod, 0)
 
-	paymentMethodsArray := strings.Split(paymentMethods, ",")
-	for _, code := range paymentMethodsArray {
-		code = strings.TrimSpace(string(code))
+	paymentMethodsArray := strings.SplitSeq(paymentMethods, ",")
+	for code := range paymentMethodsArray {
+		code = strings.TrimSpace(code)
 		if code == "" {
 			continue
 		}
@@ -83,10 +87,10 @@ func queryPaymentMethods(c *gin.Context, field string, validPaymentMethods confi
 	return result
 }
 
-func queryPurchaseStatus(c *gin.Context, field string) *models.PurchaseStatus {
-	status := c.DefaultQuery(field, "")
+func queryPurchaseStatusList(c *gin.Context, field string) *models.PurchaseStatusList {
+	status := c.QueryArray(field)
 
-	if status == "" {
+	if len(status) == 0 {
 		return nil
 	}
 
@@ -98,11 +102,19 @@ func queryPurchaseStatus(c *gin.Context, field string) *models.PurchaseStatus {
 		"refunded":  models.PurchaseStatusRefunded,
 	}
 
-	if purchaseStatus, ok := statusMapper[strings.ToLower(status)]; ok {
-		return &purchaseStatus
+	statusList := make(models.PurchaseStatusList, 0, len(status))
+
+	for _, s := range status {
+		if purchaseStatus, ok := statusMapper[strings.ToLower(s)]; ok {
+			statusList = append(statusList, purchaseStatus)
+		}
 	}
 
-	return nil
+	if len(statusList) == 0 {
+		return nil
+	}
+
+	return &statusList
 }
 
 func (handler *Handler) IsValidPaymentMethod(code models.PaymentMethod) bool {
@@ -110,14 +122,14 @@ func (handler *Handler) IsValidPaymentMethod(code models.PaymentMethod) bool {
 	return handler.config.PaymentMethods.Contains(code)
 }
 
-func (handler *Handler) ValidatePaymentMethodPayload(code models.PaymentMethod, sumupReaderId string) error {
+func (handler *Handler) ValidatePaymentMethodPayload(code models.PaymentMethod, sumupReaderID string) error {
 	// Check if the payment method code is valid
 	if !handler.IsValidPaymentMethod(code) {
 		return errors.New("invalid payment method")
 	}
 
 	// If payment method is SUMUP, sumupReaderId must be provided
-	if code == models.PaymentMethodSumUp && sumupReaderId == "" {
+	if code == models.PaymentMethodSumUp && sumupReaderID == "" {
 		return errors.New("the SumUp reader ID is required for SumUp payments")
 	}
 

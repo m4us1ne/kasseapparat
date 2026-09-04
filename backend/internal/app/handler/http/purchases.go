@@ -1,13 +1,14 @@
 package http
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/potibm/kasseapparat/internal/app/middleware"
 	"github.com/potibm/kasseapparat/internal/app/models"
 	sqliteRepo "github.com/potibm/kasseapparat/internal/app/repository/sqlite"
 	response "github.com/potibm/kasseapparat/internal/app/response"
@@ -18,12 +19,7 @@ import (
 const invalidPurchaseIDMsg = "Invalid purchase ID"
 
 func (handler *Handler) DeletePurchase(c *gin.Context) {
-	executingUserObj, err := handler.getUserFromContext(c)
-	if err != nil {
-		_ = c.Error(UnableToRetrieveExecutingUser.WithCause(err))
-
-		return
-	}
+	c = handler.contextWithUser(c)
 
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -32,7 +28,7 @@ func (handler *Handler) DeletePurchase(c *gin.Context) {
 		return
 	}
 
-	handler.repo.DeletePurchaseByID(id, *executingUserObj)
+	handler.repo.DeletePurchaseByID(id)
 
 	_ = handler.repo.RollbackVisitedGuestsByPurchaseID(id)
 
@@ -40,13 +36,6 @@ func (handler *Handler) DeletePurchase(c *gin.Context) {
 }
 
 func (handler *Handler) RefundPurchase(c *gin.Context) {
-	executingUserObj, err := handler.getUserFromContext(c)
-	if err != nil {
-		_ = c.Error(UnableToRetrieveExecutingUser.WithCause(err))
-
-		return
-	}
-
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		_ = c.Error(InvalidRequest.WithMsg(invalidPurchaseIDMsg).WithCause(err))
@@ -61,14 +50,16 @@ func (handler *Handler) RefundPurchase(c *gin.Context) {
 		return
 	}
 
-	isCreator := purchase.CreatedByID != nil && *purchase.CreatedByID == uint(executingUserObj.ID)
-	if !executingUserObj.Admin && !isCreator {
-		_ = c.Error(Forbidden.WithMsg("You are not allowed to refund this purchase"))
+	// Get authenticated user from context
+	authUser, exists := middleware.GetAuthUser(c)
+	if !exists {
+		_ = c.Error(UnableToRetrieveExecutingUser)
 
 		return
 	}
 
-	if !executingUserObj.Admin && time.Since(purchase.CreatedAt) > 15*time.Minute {
+	// Only enforce 15-minute limit for non-admin users
+	if authUser.Role != "admin" && time.Since(purchase.CreatedAt) > 15*time.Minute {
 		_ = c.Error(Forbidden.WithMsg("You can only refund purchases within 15 minutes of creation"))
 
 		return
@@ -87,12 +78,7 @@ func (handler *Handler) RefundPurchase(c *gin.Context) {
 }
 
 func (handler *Handler) PostPurchases(c *gin.Context) {
-	executingUserObj, err := handler.getUserFromContext(c)
-	if err != nil {
-		_ = c.Error(UnableToRetrieveExecutingUser.WithCause(err))
-
-		return
-	}
+	c = handler.contextWithUser(c)
 
 	var req PurchaseRequest
 	if err := c.ShouldBind(&req); err != nil {
@@ -101,7 +87,7 @@ func (handler *Handler) PostPurchases(c *gin.Context) {
 		return
 	}
 
-	err = handler.ValidatePaymentMethodPayload(req.PaymentMethod, req.SumupReaderID)
+	err := handler.ValidatePaymentMethodPayload(req.PaymentMethod, req.SumupReaderID)
 	if err != nil {
 		_ = c.Error(InvalidRequest.WithCauseMsg(err))
 
@@ -120,29 +106,21 @@ func (handler *Handler) PostPurchases(c *gin.Context) {
 	var purchase *models.Purchase
 
 	if req.PaymentMethod == models.PaymentMethodSumUp {
-		purchase, err = handler.purchaseService.CreatePendingPurchase(c.Request.Context(), input, int(executingUserObj.ID))
+		purchase, err = handler.purchaseService.CreatePendingPurchase(
+			c.Request.Context(),
+			input,
+		)
 	} else {
-		purchase, err = handler.purchaseService.CreateConfirmedPurchase(c.Request.Context(), input, int(executingUserObj.ID))
+		purchase, err = handler.purchaseService.CreateConfirmedPurchase(
+			c.Request.Context(),
+			input,
+		)
 	}
 
 	if err != nil {
-		switch err {
-		case purchaseService.ErrInvalidProductPrice,
-			purchaseService.ErrInvalidTotalGrossPrice,
-			purchaseService.ErrInvalidTotalNetPrice,
-			purchaseService.ErrProductNotFound,
-			purchaseService.ErrGuestNotFound,
-			purchaseService.ErrGuestAlreadyAttended,
-			purchaseService.ErrTooManyAdditionalGuests,
-			purchaseService.ErrListItemWrongProduct:
-			_ = c.Error(InvalidRequest.WithMsg(utils.CapitalizeFirstRune(err.Error())).WithCause(err))
+		_ = c.Error(mapPurchaseCreationError(err))
 
-			return
-		default:
-			_ = c.Error(InternalServerError.WithCauseMsg(err))
-
-			return
-		}
+		return
 	}
 
 	reloadedPurchase, err := handler.repo.GetPurchaseByID(purchase.ID)
@@ -151,40 +129,11 @@ func (handler *Handler) PostPurchases(c *gin.Context) {
 	}
 
 	if req.PaymentMethod == models.PaymentMethodSumUp {
-		clientTransactionId, err := handler.sumupRepository.CreateReaderCheckout(
-			req.SumupReaderID,
-			purchase.TotalGrossPrice,
-			"Purchase from Kasseapparat",
-			purchase.ID.String(),
-			handler.sumupRepository.GetWebhookUrl(),
-		)
-		if err != nil {
-			_ = c.Error(InternalServerError.WithMsg("Failed to create SumUp reader checkout: " + err.Error()).WithCause(err))
-
-			log.Printf("Error creating SumUp reader checkout: %v", err)
-
-			_, err = handler.purchaseService.CancelPurchase(c.Request.Context(), reloadedPurchase.ID)
-			if err != nil {
-				log.Printf("Error canceling purchase %s: %v", reloadedPurchase.ID, err)
-			}
+		if sumupErr := handler.processSumupCheckout(c, reloadedPurchase, req.SumupReaderID); sumupErr != nil {
+			_ = c.Error(sumupErr)
 
 			return
 		}
-
-		log.Printf("Created SumUp reader checkout: %s", *clientTransactionId)
-
-		_, err = handler.repo.UpdatePurchaseSumupClientTransactionIDByID(reloadedPurchase.ID, *clientTransactionId)
-		if err != nil {
-			_ = c.Error(InternalServerError.WithMsg("Failed to update purchase with SumUp transaction ID").WithCause(err))
-
-			return
-		}
-
-		log.Printf("Updated purchase %s with SumUp client transaction ID %s", reloadedPurchase.ID, *clientTransactionId)
-		log.Printf("Monitor: %+v", handler.monitor)
-
-		handler.monitor.Start(reloadedPurchase.ID)
-		log.Printf("Started monitoring for purchase %s", reloadedPurchase.ID)
 	}
 
 	purchaseResponse := response.ToPurchaseResponse(*reloadedPurchase, handler.decimalPlaces)
@@ -200,11 +149,11 @@ func (handler *Handler) GetPurchases(c *gin.Context) {
 
 	filters := sqliteRepo.PurchaseFilters{}
 	filters.PaymentMethods = queryPaymentMethods(c, "paymentMethod", handler.config.PaymentMethods)
-	filters.CreatedByID, _ = strconv.Atoi(c.DefaultQuery("createdById", "0"))
+	filters.CreatedBy = c.DefaultQuery("createdBy", "")
 	filters.TotalGrossPriceGte = queryDecimal(c, "totalGrossPrice_gte")
 	filters.TotalGrossPriceLte = queryDecimal(c, "totalGrossPrice_lte")
 	filters.IDs = queryArrayInt(c, "id")
-	filters.Status = queryPurchaseStatus(c, "status")
+	filters.StatusList = queryPurchaseStatusList(c, "status")
 
 	purchases, err := handler.repo.GetPurchases(end-start, start, sort, order, filters)
 	if err != nil {
@@ -262,4 +211,76 @@ func (handler *Handler) GetPurchaseStats(c *gin.Context) {
 
 	c.Header("Access-Control-Allow-Origin", "*")
 	c.JSON(http.StatusOK, gin.H{"stats": stats, "totalQuantity": totalQuantity})
+}
+
+func mapPurchaseCreationError(err error) error {
+	switch err {
+	case purchaseService.ErrInvalidProductPrice,
+		purchaseService.ErrInvalidTotalGrossPrice,
+		purchaseService.ErrInvalidTotalNetPrice,
+		purchaseService.ErrProductNotFound,
+		purchaseService.ErrGuestNotFound,
+		purchaseService.ErrGuestAlreadyAttended,
+		purchaseService.ErrTooManyAdditionalGuests,
+		purchaseService.ErrListItemWrongProduct:
+		return InvalidRequest.WithMsg(utils.CapitalizeFirstRune(err.Error())).WithCause(err)
+	default:
+		return InternalServerError.WithCauseMsg(err)
+	}
+}
+
+func (handler *Handler) processSumupCheckout(c *gin.Context, purchase *models.Purchase, readerID string) error {
+	clientTransactionID, err := handler.sumupRepository.CreateReaderCheckout(
+		readerID,
+		purchase.TotalGrossPrice,
+		"Purchase from Kasseapparat",
+		purchase.ID.String(),
+		handler.sumupRepository.GetWebhookURL(),
+	)
+	if err != nil {
+		slog.ErrorContext(c.Request.Context(), "Error creating SumUp reader checkout", "error", err)
+
+		_, cancelErr := handler.purchaseService.CancelPurchase(c.Request.Context(), purchase.ID)
+		if cancelErr != nil {
+			slog.ErrorContext(
+				c.Request.Context(),
+				"Error canceling purchase",
+				"purchase_id",
+				purchase.ID,
+				"error",
+				cancelErr,
+			)
+		}
+
+		return InternalServerError.WithMsg("Failed to create SumUp reader checkout: " + err.Error()).WithCause(err)
+	}
+
+	clientTransactionIDStr := "nil"
+	if clientTransactionID != nil {
+		clientTransactionIDStr = clientTransactionID.String()
+	}
+
+	slog.InfoContext(
+		c.Request.Context(),
+		"Created SumUp reader checkout",
+		"client_transaction_id",
+		clientTransactionIDStr,
+	)
+
+	_, err = handler.repo.UpdatePurchaseSumupClientTransactionIDByID(purchase.ID, *clientTransactionID)
+	if err != nil {
+		return InternalServerError.WithMsg("Failed to update purchase with SumUp transaction ID").WithCause(err)
+	}
+
+	slog.DebugContext(c.Request.Context(),
+		"Updated purchase with SumUp client transaction ID",
+		"purchase_id", purchase.ID,
+		"client_transaction_id", clientTransactionIDStr,
+	)
+	slog.DebugContext(c.Request.Context(), "Monitor", "handler_monitor", handler.monitor)
+
+	handler.monitor.Start(purchase.ID)
+	slog.InfoContext(c.Request.Context(), "Started monitoring for purchase", "purchase_id", purchase.ID)
+
+	return nil
 }

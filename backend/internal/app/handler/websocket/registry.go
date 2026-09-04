@@ -1,7 +1,8 @@
 package websocket
 
 import (
-	"log"
+	"context"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -9,11 +10,17 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/potibm/kasseapparat/internal/app/models"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
-const maxConnections = 100
-const CloseTooManyConnections = 4001
-const CloseStaleConnection = 4005
+const (
+	maxConnections          = 100
+	CloseTooManyConnections = 4001
+	CloseStaleConnection    = 4005
+)
+
+const CleanupStaleConnectionsInterval = 5 * time.Minute
 
 type wsConnection struct {
 	Conn     *websocket.Conn
@@ -33,10 +40,10 @@ func registerConnection(transactionID uuid.UUID, conn *websocket.Conn) bool {
 	connections.Lock()
 	defer connections.Unlock()
 
-	log.Println("Current WebSocket connection number:", len(connections.clients))
+	slog.Info("Current WebSocket connection number", "count", len(connections.clients))
 
 	if len(connections.clients) >= maxConnections {
-		log.Printf("WebSocket connection limit reached (%d)", maxConnections)
+		slog.Error("WebSocket connection limit reached", "max_connections", maxConnections)
 
 		return false
 	}
@@ -62,7 +69,7 @@ func PushUpdate(transactionID uuid.UUID, status models.PurchaseStatus) {
 	connections.RUnlock()
 
 	if !ok {
-		log.Printf("No WebSocket client for %s", transactionID)
+		slog.Warn("No WebSocket client for transaction", "transaction_id", transactionID.String())
 
 		return
 	}
@@ -71,23 +78,23 @@ func PushUpdate(transactionID uuid.UUID, status models.PurchaseStatus) {
 	defer client.mu.Unlock()
 
 	client.lastSeen = time.Now()
-	sendWSMessage(client.Conn, "status_update", gin.H{"status": string(status)}, &transactionID)
+	sendWSMessage(client.Conn, "status_update", gin.H{"status": string(status)}, transactionID)
 }
 
-func sendWSMessage(conn *websocket.Conn, msgType string, data gin.H, transactionID *uuid.UUID) {
-	payload := gin.H{
-		"type": msgType,
-	}
-	for k, v := range data {
-		payload[k] = v
-	}
-
-	if transactionID != nil {
-		payload["transaction_id"] = transactionID.String()
-	}
+func sendWSMessage(conn *websocket.Conn, msgType string, data gin.H, transactionID uuid.UUID) {
+	payload := data
+	payload["type"] = msgType
 
 	if err := conn.WriteJSON(payload); err != nil {
-		log.Printf("WebSocket send error [%s]: %v", msgType, err)
+		slog.Error(
+			"WebSocket send error",
+			"message_type",
+			msgType,
+			"error",
+			err,
+			"transaction_id",
+			transactionID.String(),
+		)
 
 		closeMsg := websocket.FormatCloseMessage(
 			websocket.CloseAbnormalClosure,
@@ -97,17 +104,22 @@ func sendWSMessage(conn *websocket.Conn, msgType string, data gin.H, transaction
 		_ = conn.WriteControl(websocket.CloseMessage, closeMsg, time.Now().Add(time.Second))
 		conn.Close()
 
-		if transactionID != nil {
-			unregisterConnection(*transactionID)
+		if transactionID != uuid.Nil {
+			unregisterConnection(transactionID)
 		}
 
-		return
+		msgSentCounter.Add(context.Background(), 1,
+			metric.WithAttributes(
+				attribute.String("msg_type", msgType),
+				attribute.String("transaction_id", transactionID.String()),
+			),
+		)
 	}
 }
 
 func StartCleanupRoutine(timeout time.Duration) {
 	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
+		ticker := time.NewTicker(CleanupStaleConnectionsInterval)
 		defer ticker.Stop()
 
 		for range ticker.C {
@@ -124,18 +136,30 @@ func cleanupStaleConnections(timeout time.Duration) {
 		staleConns []*websocket.Conn
 	)
 
+	slog.Debug("Checking for stale WebSocket connections", "total_connections", len(connections.clients))
 	connections.Lock()
 
 	for id, conn := range connections.clients {
 		conn.mu.Lock()
 		inactive := now.Sub(conn.lastSeen) > timeout
 		conn.mu.Unlock()
+		slog.Debug(
+			"Checking connection activity",
+			"transaction_id",
+			id,
+			"last_seen",
+			conn.lastSeen,
+			"inactive",
+			inactive,
+		)
 
 		if inactive {
 			staleIDs = append(staleIDs, id)
 			staleConns = append(staleConns, conn.Conn)
 		}
 	}
+
+	numRemoved := len(staleIDs)
 	// Remove stale connections from the registry while holding the lock
 	for _, id := range staleIDs {
 		delete(connections.clients, id)
@@ -143,9 +167,13 @@ func cleanupStaleConnections(timeout time.Duration) {
 
 	connections.Unlock()
 
+	if numRemoved > 0 {
+		activeConns.Add(context.Background(), int64(-numRemoved))
+	}
+
 	// Close WebSocket connections outside the lock to avoid blocking other operations
 	for i, ws := range staleConns {
-		log.Printf("Cleaning up stale WebSocket connection: %s", staleIDs[i])
+		slog.Info("Cleaning up stale WebSocket connection", "transaction_id", staleIDs[i])
 
 		msg := websocket.FormatCloseMessage(CloseStaleConnection, "connection stale")
 		_ = ws.WriteControl(websocket.CloseMessage, msg, time.Now().Add(time.Second))

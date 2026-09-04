@@ -1,167 +1,147 @@
 package middleware
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
-	"strings"
-	"time"
+	"slices"
 
-	ginjwt "github.com/appleboy/gin-jwt/v2"
 	"github.com/gin-gonic/gin"
+	"github.com/potibm/kasseapparat/internal/app/config"
 	"github.com/potibm/kasseapparat/internal/app/models"
-	sqliteRepo "github.com/potibm/kasseapparat/internal/app/repository/sqlite"
+	"github.com/potibm/kasseapparat/internal/app/session"
+	gormaudit "github.com/potibm/kasseapparat/internal/app/store/gorm"
 )
 
-var IdentityKey = "ID"
+const (
+	IdentityKey      = "username"
+	AuthUserKey      = "auth_user"
+	RemoteUserHeader = "X-Remote-User"
+	DefaultUsername  = "anonymous"
+)
 
-type login struct {
-	Login    string `binding:"required" form:"login"    json:"login"`
-	Password string `binding:"required" form:"password" json:"password"`
-}
-
-type loginResponse struct {
-	Code        int     `json:"code"`
-	Token       string  `json:"token"`
-	Expire      string  `json:"expire"`
-	Role        *string `json:"role"`
-	Username    *string `json:"username"`
-	GravatarUrl *string `json:"gravatarUrl"`
-	Id          *uint   `json:"id"`
-}
-
-func HandlerMiddleWare(authMiddleware *ginjwt.GinJWTMiddleware) gin.HandlerFunc {
-	return func(context *gin.Context) {
-		errInit := authMiddleware.MiddlewareInit()
-		if errInit != nil {
-			log.Fatal("authMiddleware.MiddlewareInit() Error:" + errInit.Error())
-		}
-	}
-}
-
-func RegisterRoute(r *gin.Engine, handle *ginjwt.GinJWTMiddleware) {
-	r.POST("/login", handle.LoginHandler)
-	auth := r.Group("/auth", handle.MiddlewareFunc())
-	auth.GET("/refresh_token", handle.RefreshHandler)
-}
-
-func InitParams(repo *sqliteRepo.Repository, realm string, secret string, timeout int) *ginjwt.GinJWTMiddleware {
-	if secret == "" {
-		log.Println("JWT_SECRET is not set, using default value")
-
-		secret = "secret"
+func HandlerMiddleWare(cfg config.Config) gin.HandlerFunc {
+	if cfg.Auth.Mode == "oidc" {
+		return OIDCAuthMiddleware(cfg)
 	}
 
-	return &ginjwt.GinJWTMiddleware{
-		Realm:       realm,
-		Key:         []byte(secret),
-		Timeout:     time.Duration(timeout) * time.Minute,
-		MaxRefresh:  time.Hour,
-		IdentityKey: IdentityKey,
-		PayloadFunc: payloadFunc(),
-
-		IdentityHandler: identityHandler(),
-		Authenticator:   authenticator(repo),
-		Authorizator:    authorizator(),
-		Unauthorized:    unauthorized(),
-		TokenLookup:     "header: Authorization, query: token, cookie: jwt",
-		// TokenLookup: "query:token",
-		// TokenLookup: "cookie:token",
-		TokenHeadName: "Bearer",
-		TimeFunc:      time.Now,
-
-		LoginResponse: func(c *gin.Context, code int, message string, time time.Time) {
-			user, err := c.Get(IdentityKey)
-			var userObj *models.User = nil
-			if err {
-				userObj = user.(*models.User)
-			}
-			loginReponse(c, code, message, time, userObj)
-		},
-	}
+	return ProxyAuthMiddleware(cfg)
 }
 
-func authenticator(repo *sqliteRepo.Repository) func(c *gin.Context) (interface{}, error) {
-	return func(c *gin.Context) (interface{}, error) {
-		var loginVals login
-		if err := c.ShouldBind(&loginVals); err != nil {
-			return "", ginjwt.ErrMissingLoginValues
+func ProxyAuthMiddleware(cfg config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if cfg.Auth.Mode != "proxy" {
+			c.Next()
+
+			return
 		}
 
-		login := strings.TrimSpace(loginVals.Login)
-		password := strings.TrimSpace(loginVals.Password)
+		username := c.GetHeader(cfg.Auth.ProxyHeader)
+		if username == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"code":    http.StatusUnauthorized,
+				"message": "authentication required: missing proxy header",
+			})
+			c.Abort()
 
-		user, err := repo.GetUserByLoginAndPassword(login, password)
-		if err == nil {
-			c.Set(IdentityKey, user) // Set the user in the context
-
-			return user, nil
+			return
 		}
 
-		return nil, ginjwt.ErrFailedAuthentication
-	}
-}
-
-func payloadFunc() func(data interface{}) ginjwt.MapClaims {
-	return func(data interface{}) ginjwt.MapClaims {
-		if v, ok := data.(*models.User); ok {
-			return ginjwt.MapClaims{
-				IdentityKey: v.ID,
-			}
+		role := "user"
+		if slices.Contains(cfg.Auth.ProxyAdmins, username) {
+			role = "admin"
 		}
 
-		return ginjwt.MapClaims{}
-	}
-}
-
-func identityHandler() func(c *gin.Context) interface{} {
-	return func(c *gin.Context) interface{} {
-		claims := ginjwt.ExtractClaims(c)
-
-		return &models.User{
-			ID: uint(claims[IdentityKey].(float64)),
-		}
-	}
-}
-
-func authorizator() func(data interface{}, c *gin.Context) bool {
-	return func(data interface{}, c *gin.Context) bool {
-		if _, ok := data.(*models.User); ok {
-			return true
+		authUser := models.AuthUser{
+			Username: username,
+			Role:     role,
 		}
 
-		return false
+		c.Set(IdentityKey, username)
+		c.Set(AuthUserKey, authUser)
+
+		ctx := gormaudit.WithUserID(c.Request.Context(), username)
+		c.Request = c.Request.WithContext(ctx)
+
+		slog.Debug("Proxy authentication successful", "username", username, "role", role)
+
+		c.Next()
 	}
 }
 
-func unauthorized() func(c *gin.Context, code int, message string) {
-	return func(c *gin.Context, code int, message string) {
-		c.JSON(code, gin.H{
-			"code":    code,
-			"message": message,
-		})
+func OIDCAuthMiddleware(cfg config.Config) gin.HandlerFunc {
+	sessionMgr := session.NewManager(cfg.Auth.SessionSecret, cfg.Auth.SessionDuration)
+
+	return func(c *gin.Context) {
+		if cfg.Auth.Mode != "oidc" {
+			c.Next()
+
+			return
+		}
+
+		sessionCookie, err := c.Cookie(session.SessionCookieName)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"code":    http.StatusUnauthorized,
+				"message": "authentication required: missing session cookie",
+			})
+			c.Abort()
+
+			return
+		}
+
+		sessionData, err := sessionMgr.DecodeSession(sessionCookie)
+		if err != nil {
+			slog.Debug("Invalid session", "error", err)
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"code":    http.StatusUnauthorized,
+				"message": "authentication required: invalid session",
+			})
+			c.Abort()
+
+			return
+		}
+
+		authUser := models.AuthUser{
+			Username: sessionData.Username,
+			Role:     sessionData.Role,
+		}
+
+		c.Set(IdentityKey, sessionData.Username)
+		c.Set(AuthUserKey, authUser)
+
+		ctx := gormaudit.WithUserID(c.Request.Context(), sessionData.Username)
+		c.Request = c.Request.WithContext(ctx)
+
+		slog.Debug("OIDC authentication successful", "username", sessionData.Username, "role", sessionData.Role)
+
+		c.Next()
 	}
 }
 
-func loginReponse(c *gin.Context, code int, token string, expire time.Time, user *models.User) {
-	loginResponse := loginResponse{
-		Code:   http.StatusOK,
-		Token:  token,
-		Expire: expire.Format(time.RFC3339),
+func GetAuthUser(c *gin.Context) (*models.AuthUser, bool) {
+	authUser, exists := c.Get(AuthUserKey)
+	if !exists {
+		return nil, false
 	}
 
-	if user != nil {
-		role := user.Role()
-		loginResponse.Role = &role
-
-		username := user.Username
-		loginResponse.Username = &username
-
-		gravatarUrl := user.GravatarURL()
-		loginResponse.GravatarUrl = &gravatarUrl
-
-		id := user.ID
-		loginResponse.Id = &id
+	user, ok := authUser.(models.AuthUser)
+	if !ok {
+		return nil, false
 	}
 
-	c.JSON(code, loginResponse)
+	return &user, true
+}
+
+func GetUsername(c *gin.Context) string {
+	username, exists := c.Get(IdentityKey)
+	if !exists {
+		return DefaultUsername
+	}
+
+	usernameStr, ok := username.(string)
+	if !ok {
+		return DefaultUsername
+	}
+
+	return usernameStr
 }

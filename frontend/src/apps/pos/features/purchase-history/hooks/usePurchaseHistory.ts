@@ -1,0 +1,127 @@
+// src/apps/pos/features/purchase-history/hooks/usePurchaseHistory.ts
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { Purchase as PurchaseType } from "../../../api/schemas";
+import { createLogger } from "@core/logger/logger";
+import { useToast } from "@pos/features/ui/toast/hooks/useToast";
+import { useConfig } from "@core/config/hooks/useConfig";
+import { usePosApi } from "@pos/api/usePosApi";
+
+const log = createLogger("Purchase");
+
+export const usePurchaseHistory = (username: string) => {
+  const [history, setHistory] = useState<PurchaseType[] | null>(null);
+  const [loading, setLoading] = useState<boolean>(false);
+  const { showToast } = useToast();
+  const { currency } = useConfig();
+  const { fetchPurchases, refundPurchaseById } = usePosApi();
+
+  /**
+   * Load history of purchases for the current user.
+   * @param isSilent when true, the function will not show loading states or error toasts. Useful for background refreshes.
+   */
+  const loadHistory = useCallback(
+    async (isSilent = false) => {
+      if (!username) {
+        log.warn("No username provided, cannot load purchase history");
+        if (!isSilent) {
+          setHistory([]);
+          setLoading(false);
+        }
+        return;
+      }
+
+      if (!isSilent) {
+        setLoading(true);
+        setHistory((prev) => prev ?? []);
+      }
+
+      try {
+        const purchases = await fetchPurchases(username);
+
+        setHistory(purchases);
+        log.debug("Purchase history fetched successfully", {
+          purchaseCount: purchases.length,
+          silent: isSilent,
+        });
+      } catch (error: unknown) {
+        log.error(
+          "Error fetching purchase history",
+          error instanceof Error ? { message: error.message } : { error },
+        );
+
+        if (!isSilent) {
+          const errorMessage =
+            error instanceof Error
+              ? "Error while loading the purchase history: " + error.message
+              : "An unknown error has occurred";
+
+          showToast({
+            severity: "error",
+            message: errorMessage,
+            autoClose: false,
+          });
+          setHistory([]);
+        }
+      } finally {
+        if (!isSilent) {
+          setLoading(false);
+        }
+      }
+    },
+    [username, showToast, fetchPurchases],
+  );
+
+  useEffect(() => {
+    loadHistory();
+  }, [loadHistory]);
+
+  const hasPendingPurchases = useMemo(() => {
+    return history?.some((p) => p.status === "pending") ?? false;
+  }, [history]);
+
+  useEffect(() => {
+    if (!hasPendingPurchases) return;
+
+    log.debug("Pending purchases detected. Starting background polling...");
+
+    const intervalId = setInterval(() => {
+      loadHistory(true);
+    }, 5000);
+
+    return () => {
+      log.debug("Stopping background polling.");
+      clearInterval(intervalId);
+    };
+  }, [hasPendingPurchases, loadHistory]);
+
+  const refund = async (purchaseId: string) => {
+    try {
+      const purchase = await refundPurchaseById(purchaseId);
+      showToast({
+        severity: "success",
+        message: `Purchase of ${currency.format(purchase.totalGrossPrice.toNumber())} refunded successfully!`,
+      });
+      await loadHistory();
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error
+          ? "Error while refunding the purchase: " + error.message
+          : "An unknown error has occurred";
+
+      showToast({
+        severity: "error",
+        message: errorMessage,
+        autoClose: false,
+        blocking: true,
+      });
+      throw error;
+    }
+  };
+
+  return {
+    history,
+    loading,
+    refreshHistory: loadHistory,
+    refundPurchase: refund,
+  };
+};

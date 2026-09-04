@@ -1,167 +1,108 @@
 package config
 
 import (
-	"log"
-	"os"
 	"strings"
+	"time"
 
-	"github.com/joho/godotenv"
+	"github.com/potibm/kasseapparat/internal/app/models"
+	"github.com/spf13/viper"
 )
 
 const (
-	DefaultVatRates    = "[{\"rate\":25,\"name\":\"Standard\"},{\"rate\":0,\"name\":\"Zero rate\"}]"
-	DefaultDateOptions = "{\"weekday\":\"long\",\"hour\":\"2-digit\",\"minute\":\"2-digit\"}"
+	OtelServiceName        = "kasseapparat"
+	OtelBackendServiceName = OtelServiceName + "-backend"
+
+	DefaultPort = 8080
+
+	DefaultTraceSampleRate         = 0.1
+	DefaultReplaySessionSampleRate = 0.1
+	DefaultReplayErrorSampleRate   = 0.1
+	DefaultMinorUnit               = 2
+	DefaultSessionDuration         = 24 * time.Hour
+
+	DefaultStandardVatRate = 25
+	DefaultReducedVatRate  = 12
+	DefaultZeroVatRate     = 0
+
+	DataDirname = "./data"
+
+	DefaultDBFilename = "kasseapparat"
+
+	DataDirPerm = 0o755
 )
 
-type SentryConfig struct {
-	DSN                     string
-	TraceSampleRate         float64
-	ReplaySessionSampleRate float64
-	ReplayErrorSampleRate   float64
-	Environment             string
-	Version                 string
-}
-
-type JwtConfig struct {
-	Secret string
-	Realm  string
-}
-
-type MailerConfig struct {
-	DSN               string
-	FromEmail         string
-	MailSubjectPrefix string
-	FrontendURL       string
-}
-
-type AppConfig struct {
-	Version string
-	GinMode string
-}
-
-type FormatConfig struct {
-	CurrencyLocale    string
-	CurrencyCode      string
-	DateLocale        string
-	DateOptions       string
-	FractionDigitsMin int
-	FractionDigitsMax int
-}
-
-type CorsAllowOriginsConfig []string
-
-type Config struct {
-	AppConfig          AppConfig
-	FormatConfig       FormatConfig
-	VATRates           string
-	EnvironmentMessage string
-	PaymentMethods     PaymentMethods
-	SentryConfig       SentryConfig
-	JwtConfig          JwtConfig
-	CorsAllowOrigins   CorsAllowOriginsConfig
-	FrontendURL        string
-	MailerConfig       MailerConfig
-	SumupConfig        SumupConfig
-}
-
-func (cfg Config) OutputVersion() {
-	log.Printf("Kasseapparat %s\n", cfg.AppConfig.Version)
-}
-
-func Load() Config {
-	err := godotenv.Load()
-	if err != nil {
-		log.Println("Error loading .env file, using environment variables")
+var (
+	DefaultDateOptions = DateFormatOptionsConfig{
+		"weekday": "long",
+		"hour":    "2-digit",
+		"minute":  "2-digit",
 	}
-
-	return loadConfig()
-}
-
-func loadConfig() Config {
-	return Config{
-		AppConfig:          loadAppConfig(),
-		FormatConfig:       loadFormatConfig(),
-		VATRates:           getEnvWithJSONValidation("VAT_RATES", DefaultVatRates),
-		EnvironmentMessage: getEnv("ENV_MESSAGE", ""),
-		PaymentMethods:     loadPaymentMethods(),
-		SentryConfig:       loadSentryConfig(),
-		JwtConfig:          loadJwtConfig(),
-		CorsAllowOrigins:   loadCorsAllowOrigins(),
-		MailerConfig:       loadMailerConfig(),
-		SumupConfig:        loadSumupConfig(),
+	DefaultVatRates = VatRatesConfig{
+		{Name: "Standard", Rate: DefaultStandardVatRate},
+		{Name: "Reduced", Rate: DefaultReducedVatRate},
+		{Name: "Zero", Rate: DefaultZeroVatRate},
 	}
-}
-
-func loadAppConfig() AppConfig {
-	return AppConfig{
-		Version: readVersionFromFile(),
-		GinMode: getEnv("GIN_MODE", "release"),
+	DefaultPaymentMethods = []PaymentMethodConfig{
+		{Code: models.PaymentMethodCash, Name: "Cash"},
+		{Code: models.PaymentMethodCC, Name: "Creditcard"},
+		{Code: models.PaymentMethodVoucher, Name: "Voucher"},
 	}
-}
+)
 
-func readVersionFromFile() string {
-	versionFilePath := "./VERSION"
+func InitViper() {
+	viper.AutomaticEnv()
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
-	content, err := os.ReadFile(versionFilePath)
-	if err != nil {
-		log.Printf("Error reading the version file: %v", err)
+	viper.SetDefault("app.port", DefaultPort)
+	viper.SetDefault("app.otel_endpoint", "")
+	viper.SetDefault("app.gin_mode", "release")
+	viper.SetDefault("app.log_level", "info")
+	viper.SetDefault("app.env", "production")
+	viper.SetDefault("app.db_filename", DefaultDBFilename)
 
-		return "0.0.0"
-	}
+	viper.SetDefault("app.frontend_url", "")
+	viper.SetDefault("app.cors_allow_origins", []string{})
 
-	return strings.TrimSpace(string(content))
-}
+	viper.SetDefault("format.currency.locale", "da-DK")
+	viper.SetDefault("format.currency.code", "DKK")
+	viper.SetDefault("format.currency.fraction_digits_min", 0)
+	viper.SetDefault("format.currency.fraction_digits_max", DefaultMinorUnit)
+	viper.SetDefault("format.date.locale", "da-DK")
+	viper.SetDefault("format.date.options", DefaultDateOptions)
 
-func loadCorsAllowOrigins() []string {
-	origins := getEnv("CORS_ALLOW_ORIGINS", "")
-	if origins == "" {
-		log.Fatalf("CORS_ALLOW_ORIGINS is not set in env")
-	}
+	viper.SetDefault("sentry.dsn", "")
+	viper.SetDefault("sentry.trace_sample_rate", DefaultTraceSampleRate)
+	viper.SetDefault("sentry.replay_session_sample_rate", DefaultReplaySessionSampleRate)
+	viper.SetDefault("sentry.replay_error_sample_rate", DefaultReplayErrorSampleRate)
 
-	return strings.Split(origins, ",")
-}
+	viper.SetDefault("mailer.dsn", "smtp://user:password@localhost:1025")
+	viper.SetDefault("mailer.from", "kasseapparat@example.com")
+	viper.SetDefault("mailer.subject_prefix", "[Kasseapparat]")
 
-func loadFormatConfig() FormatConfig {
-	return FormatConfig{
-		CurrencyLocale:    getEnv("CURRENCY_LOCALE", "dk-DK"),
-		CurrencyCode:      getCurrencyCode(),
-		DateLocale:        getEnv("DATE_LOCALE", "dk-DK"),
-		DateOptions:       getEnvWithJSONValidation("DATE_OPTIONS", DefaultDateOptions),
-		FractionDigitsMin: getEnvAsInt("FRACTION_DIGITS_MIN", 0),
-		FractionDigitsMax: getCurrencyMinorUnit(),
-	}
-}
+	viper.SetDefault("sumup.api_key", "")
+	viper.SetDefault("sumup.merchant_code", "")
+	viper.SetDefault("sumup.currency_code", "")
+	viper.SetDefault("sumup.currency_minor_unit", DefaultMinorUnit)
+	viper.SetDefault("sumup.affiliate_key", "")
+	viper.SetDefault("sumup.application_id", "")
+	viper.SetDefault("sumup.public_url", "")
 
-func loadSentryConfig() SentryConfig {
-	return SentryConfig{
-		DSN:                     getEnv("SENTRY_DSN", ""),
-		TraceSampleRate:         getEnvAsFloat("SENTRY_TRACE_SAMPLE_RATE", 0.1),
-		ReplaySessionSampleRate: getEnvAsFloat("SENTRY_REPLAY_SESSION_SAMPLE_RATE", 0.1),
-		ReplayErrorSampleRate:   getEnvAsFloat("SENTRY_REPLAY_ERROR_SAMPLE_RATE", 0.1),
-		Version:                 readVersionFromFile(),
-	}
-}
+	viper.SetDefault("auth.mode", "proxy")
+	viper.SetDefault("auth.proxy_header", "X-Remote-User")
+	viper.SetDefault("auth.proxy_admins", []string{})
+	viper.SetDefault("auth.oidc_issuer", "")
+	viper.SetDefault("auth.oidc_client_id", "")
+	viper.SetDefault("auth.oidc_client_secret", "")
+	viper.SetDefault("auth.oidc_callback_url", "")
+	viper.SetDefault("auth.oidc_admin_group", "")
+	viper.SetDefault("auth.session_secret", "")
+	viper.SetDefault("auth.session_duration", DefaultSessionDuration)
 
-func loadJwtConfig() JwtConfig {
-	return JwtConfig{
-		Realm:  getEnv("JWT_REALM", "kasseapparat"),
-		Secret: getEnv("JWT_SECRET", ""),
-	}
-}
+	viper.SetDefault("vatrates", DefaultVatRates)
+	viper.SetDefault("payment_methods", DefaultPaymentMethods)
 
-func loadMailerConfig() MailerConfig {
-	return MailerConfig{
-		DSN:               getEnv("MAIL_DSN", "smtp://user:password@localhost:1025"),
-		FromEmail:         getEnv("MAIL_FROM", ""),
-		MailSubjectPrefix: getEnv("MAIL_SUBJECT_PREFIX", "[Kasseapparat]"),
-		FrontendURL:       getEnv("FRONTEND_URL", ""),
-	}
-}
-
-func getCurrencyCode() string {
-	return getEnv("CURRENCY_CODE", "DKK")
-}
-
-func getCurrencyMinorUnit() int {
-	return getEnvAsInt("FRACTION_DIGITS_MAX", 2)
+	viper.RegisterAlias("mailer.frontend_url", "app.frontend_url")
+	viper.RegisterAlias("sentry.environment", "app.env")
+	viper.RegisterAlias("sentry.version", "app.version")
+	viper.RegisterAlias("sumup.currency_code", "format.currency.code")
 }

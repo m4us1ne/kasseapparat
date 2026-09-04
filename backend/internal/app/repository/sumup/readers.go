@@ -2,11 +2,12 @@ package sumup
 
 import (
 	"context"
-	"log"
+	"log/slog"
 
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
-	"github.com/sumup/sumup-go/readers"
+	sumup "github.com/sumup/sumup-go"
+	sumupnullable "github.com/sumup/sumup-go/nullable"
 )
 
 func (r *Repository) GetReaders() ([]Reader, error) {
@@ -24,13 +25,13 @@ func (r *Repository) GetReaders() ([]Reader, error) {
 	return result, nil
 }
 
-func (r *Repository) GetReader(readerId string) (*Reader, error) {
-	params := readers.GetReaderParams{}
-	id := readers.ReaderId(readerId)
+func (r *Repository) GetReader(readerID string) (*Reader, error) {
+	params := sumup.ReadersGetParams{}
+	id := sumup.ReaderID(readerID)
 
 	reader, err := r.service.Client.Readers.Get(context.Background(), r.service.MerchantCode, id, params)
 	if err != nil {
-		log.Printf("Error retrieving reader with ID %s: %v", readerId, err)
+		slog.Error("Error retrieving reader with ID", "reader_id", readerID, "error", err)
 
 		if isReaderNotFoundError(err) {
 			return nil, nil
@@ -46,12 +47,12 @@ func isReaderNotFoundError(err error) bool {
 	return err != nil && err.Error() == "The requested Reader resource does not exists."
 }
 
-func (r *Repository) CreateReader(pairingCode string, name string) (*Reader, error) {
-	readerName := readers.ReaderName(name)
+func (r *Repository) CreateReader(pairingCode, name string) (*Reader, error) {
+	readerName := sumup.ReaderName(name)
 
-	body := readers.CreateReaderBody{
-		PairingCode: readers.ReaderPairingCode(pairingCode),
-		Name:        &readerName,
+	body := sumup.ReadersCreateParams{
+		PairingCode: sumup.ReaderPairingCode(pairingCode),
+		Name:        readerName,
 	}
 
 	createdReader, err := r.service.Client.Readers.Create(context.Background(), r.service.MerchantCode, body)
@@ -62,63 +63,74 @@ func (r *Repository) CreateReader(pairingCode string, name string) (*Reader, err
 	return fromSDKReader(createdReader), nil
 }
 
-func (r *Repository) CreateReaderCheckout(readerId string, amount decimal.Decimal, description string, affiliateTransactionId string, returnUrl *string) (*uuid.UUID, error) {
-	amountStruct := readers.CreateReaderCheckoutAmount{
+func (r *Repository) CreateReaderCheckout(
+	readerID string,
+	amount decimal.Decimal,
+	description string,
+	affiliateTransactionID string,
+	returnURL *string,
+) (*uuid.UUID, error) {
+	amountStruct := sumup.CreateCheckoutRequestTotalAmount{
 		Currency:  r.service.PaymentCurrency,
-		Value:     getValueFromDecimal(amount, int(r.service.PaymentMinorUnit)), // Example amount in cents (10.00 EUR)
+		Value:     getValueFromDecimal(amount, r.service.PaymentMinorUnit), // Example amount in cents (10.00 EUR)
 		MinorUnit: int(r.service.PaymentMinorUnit),
 	}
 
-	var affiliate *readers.Affiliate
-	if affiliateTransactionId != "" {
-		affiliate = &readers.Affiliate{
-			AppId:                r.service.ApplicationId,
+	var affiliateNullable *sumupnullable.Field[sumup.CreateCheckoutRequestAffiliate]
+
+	if affiliateTransactionID != "" {
+		affiliate := sumup.CreateCheckoutRequestAffiliate{
+			AppID:                r.service.ApplicationID,
 			Key:                  r.service.AffiliateKey,
-			ForeignTransactionId: affiliateTransactionId,
+			ForeignTransactionID: affiliateTransactionID,
 		}
+		affiliateNullable = sumupnullable.Value(affiliate)
 	}
 
-	body := readers.CreateReaderCheckoutBody{
+	body := sumup.ReadersCreateCheckoutParams{
 		TotalAmount: amountStruct,
 		Description: &description,
-		Affiliate:   affiliate,
-		ReturnUrl:   returnUrl,
+		Affiliate:   affiliateNullable,
+		ReturnURL:   returnURL,
 	}
 
-	response, err := r.service.Client.Readers.CreateCheckout(context.Background(), r.service.MerchantCode, readerId, body)
+	response, err := r.service.Client.Readers.CreateCheckout(
+		context.Background(),
+		r.service.MerchantCode,
+		readerID,
+		body,
+	)
 	if err != nil {
-		log.Printf("Error creating SumUp reader checkout: %v", err)
+		slog.Error("Error creating SumUp reader checkout", "error", err)
 
-		errorString := extractCreateCheckoutErrorDetails(err)
-
-		return nil, errorString
+		return nil, err
 	}
 
-	clientTransactionId, err := uuid.Parse(*response.Data.ClientTransactionId)
+	clientTransactionID, err := uuid.Parse(response.Data.ClientTransactionID)
 	if err != nil {
 		return nil, err
 	}
 
-	return &clientTransactionId, nil
+	return &clientTransactionID, nil
 }
 
-func getValueFromDecimal(value decimal.Decimal, minorUnit int) int {
-	return int(value.Shift(int32(minorUnit)).IntPart())
+func getValueFromDecimal(value decimal.Decimal, minorUnit int32) int {
+	return int(value.Shift(minorUnit).IntPart())
 }
 
-func (r *Repository) CreateReaderTerminateAction(readerId string) error {
-	return r.service.Client.Readers.TerminateCheckout(context.Background(), r.service.MerchantCode, readerId)
+func (r *Repository) CreateReaderTerminateAction(readerID string) error {
+	return r.service.Client.Readers.TerminateCheckout(context.Background(), r.service.MerchantCode, readerID)
 }
 
-func (r *Repository) DeleteReader(readerId string) error {
-	id := readers.ReaderId(readerId)
+func (r *Repository) DeleteReader(readerID string) error {
+	id := sumup.ReaderID(readerID)
 
-	return r.service.Client.Readers.DeleteReader(context.Background(), r.service.MerchantCode, id)
+	return r.service.Client.Readers.Delete(context.Background(), r.service.MerchantCode, id)
 }
 
-func fromSDKReader(sdkReader *readers.Reader) *Reader {
+func fromSDKReader(sdkReader *sumup.Reader) *Reader {
 	return &Reader{
-		ID:               string(sdkReader.Id),
+		ID:               string(sdkReader.ID),
 		Name:             string(sdkReader.Name),
 		Status:           string(sdkReader.Status),
 		DeviceIdentifier: string(sdkReader.Device.Identifier),

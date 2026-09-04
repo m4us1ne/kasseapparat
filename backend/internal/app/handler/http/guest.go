@@ -12,24 +12,24 @@ import (
 )
 
 type GuestCreateRequest struct {
-	GuestlistID          uint    `binding:"required"          form:"guestlistId"          json:"guestlistId"`
-	Name                 string  `binding:"required"          form:"name"                 json:"name"`
-	Code                 string  `form:"code"                 json:"code"`
-	AdditionalGuests     uint    `form:"additionalGuests"     json:"additionalGuests"`
-	AttendedGuests       uint    `form:"attendedGuests"       json:"attendedGuests"`
-	ArrivalNote          *string `form:"arrivalNote"          json:"arrivalNote"`
-	NotifyOnArrivalEmail *string `form:"notifyOnArrivalEmail" json:"notifyOnArrivalEmail"`
+	GuestlistID          int     `json:"guestlistId"          form:"guestlistId"          binding:"required"`
+	Name                 string  `json:"name"                 form:"name"                 binding:"required"`
+	Code                 string  `json:"code"                 form:"code"`
+	AdditionalGuests     uint    `json:"additionalGuests"     form:"additionalGuests"`
+	AttendedGuests       uint    `json:"attendedGuests"       form:"attendedGuests"`
+	ArrivalNote          *string `json:"arrivalNote"          form:"arrivalNote"`
+	NotifyOnArrivalEmail *string `json:"notifyOnArrivalEmail" form:"notifyOnArrivalEmail"`
 }
 
 type GuestUpdateRequest struct {
-	GuestlistID          uint       `form:"guestlistId"          json:"guestlistId"`
-	Name                 string     `binding:"required"          form:"name"                 json:"name"`
-	Code                 string     `form:"code"                 json:"code"`
-	AdditionalGuests     uint       `form:"additionalGuests"     json:"additionalGuests"`
-	AttendedGuests       uint       `form:"attendedGuests"       json:"attendedGuests"`
-	ArrivedAt            *time.Time `form:"arrivedAt"            json:"arrivedAt"`
-	ArrivalNote          *string    `form:"arrivalNote"          json:"arrivalNote"`
-	NotifyOnArrivalEmail *string    `form:"notifyOnArrivalEmail" json:"notifyOnArrivalEmail"`
+	GuestlistID          int        `json:"guestlistId"          form:"guestlistId"`
+	Name                 string     `json:"name"                 form:"name"                 binding:"required"`
+	Code                 string     `json:"code"                 form:"code"`
+	AdditionalGuests     uint       `json:"additionalGuests"     form:"additionalGuests"`
+	AttendedGuests       uint       `json:"attendedGuests"       form:"attendedGuests"`
+	ArrivedAt            *time.Time `json:"arrivedAt"            form:"arrivedAt"`
+	ArrivalNote          *string    `json:"arrivalNote"          form:"arrivalNote"`
+	NotifyOnArrivalEmail *string    `json:"notifyOnArrivalEmail" form:"notifyOnArrivalEmail"`
 }
 
 func (handler *Handler) GetGuests(c *gin.Context) {
@@ -94,12 +94,7 @@ func (handler *Handler) GetGuestByID(c *gin.Context) {
 }
 
 func (handler *Handler) UpdateGuestByID(c *gin.Context) {
-	executingUserObj, err := handler.getUserFromContext(c)
-	if err != nil {
-		_ = c.Error(UnableToRetrieveExecutingUser.WithCause(err))
-
-		return
-	}
+	c = handler.contextWithUser(c)
 
 	id, _ := strconv.Atoi(c.Param("id"))
 
@@ -130,7 +125,6 @@ func (handler *Handler) UpdateGuestByID(c *gin.Context) {
 
 	guest.AdditionalGuests = guestRequest.AdditionalGuests
 	guest.AttendedGuests = guestRequest.AttendedGuests
-	guest.UpdatedByID = &executingUserObj.ID
 	guest.ArrivedAt = guestRequest.ArrivedAt
 	guest.ArrivalNote = guestRequest.ArrivalNote
 	guest.NotifyOnArrivalEmail = guestRequest.NotifyOnArrivalEmail
@@ -146,12 +140,7 @@ func (handler *Handler) UpdateGuestByID(c *gin.Context) {
 }
 
 func (handler *Handler) CreateGuest(c *gin.Context) {
-	executingUserObj, err := handler.getUserFromContext(c)
-	if err != nil {
-		_ = c.Error(UnableToRetrieveExecutingUser)
-
-		return
-	}
+	c = handler.contextWithUser(c)
 
 	var guest models.Guest
 
@@ -173,7 +162,6 @@ func (handler *Handler) CreateGuest(c *gin.Context) {
 
 	guest.AdditionalGuests = guestRequest.AdditionalGuests
 	guest.AttendedGuests = guestRequest.AttendedGuests
-	guest.CreatedByID = &executingUserObj.ID
 	guest.ArrivalNote = guestRequest.ArrivalNote
 	guest.NotifyOnArrivalEmail = guestRequest.NotifyOnArrivalEmail
 
@@ -188,12 +176,7 @@ func (handler *Handler) CreateGuest(c *gin.Context) {
 }
 
 func (handler *Handler) DeleteGuestByID(c *gin.Context) {
-	executingUserObj, err := handler.getUserFromContext(c)
-	if err != nil {
-		_ = c.Error(UnableToRetrieveExecutingUser)
-
-		return
-	}
+	c = handler.contextWithUser(c)
 
 	id, _ := strconv.Atoi(c.Param("id"))
 
@@ -204,13 +187,7 @@ func (handler *Handler) DeleteGuestByID(c *gin.Context) {
 		return
 	}
 
-	if !executingUserObj.Admin && *guest.CreatedByID != executingUserObj.ID {
-		_ = c.Error(Forbidden)
-
-		return
-	}
-
-	handler.repo.DeleteGuest(*guest, *executingUserObj)
+	handler.repo.DeleteGuest(*guest)
 
 	c.Status(http.StatusNoContent)
 }

@@ -1,0 +1,214 @@
+import "../assets/styles/pos-style.css";
+
+import React, { useState, useCallback } from "react";
+import { Alert } from "flowbite-react";
+// components & layouts
+import Cart from "../features/cart/components/Cart";
+import ProductList from "../features/product-list/components/ProductList";
+import PurchaseHistory from "../features/purchase-history/components/PurchaseHistory";
+import ErrorModal from "../components/ErrorModal";
+import Menu from "../features/menu/components/Menu";
+import PollingModal from "@pos/features/payment/components/PollingModal";
+import Version from "../components/Version";
+import PosLayout from "../layouts/PosLayout";
+// hooks
+import { useAuth } from "../features/auth/hooks/useAuth";
+import { useConfig } from "@core/config/hooks/useConfig";
+import { useProducts } from "../features/product-list/hooks/useProducts";
+import { useCart } from "../features/cart/hooks/useCart";
+import { usePurchaseHistory } from "../features/purchase-history/hooks/usePurchaseHistory";
+// types
+import { PaymentMethodData } from "../features/cart/types/cart.types";
+import {
+  Product as ProductType,
+  Purchase as PurchaseType,
+  Guest as GuestType,
+} from "../api/schemas";
+import { createLogger } from "@core/logger/logger";
+import { ToastProvider } from "@pos/features/ui/toast/providers/ToastProvider";
+import { CriticalError } from "@core/components/CriticalError";
+
+const logPurchase = createLogger("Purchase");
+
+interface KasseapparatContentProps {
+  username: string;
+}
+
+const KasseapparatContent: React.FC<KasseapparatContentProps> = ({
+  username,
+}) => {
+  const { environmentMessage } = useConfig();
+
+  const [errorMessage, setErrorMessage] = useState<string>("");
+
+  const showError = useCallback((message: string) => {
+    setErrorMessage(message);
+  }, []);
+
+  const handleCloseError = () => {
+    setErrorMessage("");
+  };
+
+  const {
+    products,
+    loading: _productsLoading,
+    refreshProducts,
+    addInterest,
+  } = useProducts();
+
+  const {
+    cart,
+    add,
+    remove,
+    clear,
+    checkout,
+    checkoutProcessing,
+    isPolling,
+    pendingPurchase,
+    finalizeCheckout,
+    resumePolling,
+  } = useCart();
+
+  const {
+    history,
+    refreshHistory,
+    refundPurchase,
+    loading: historyLoading,
+  } = usePurchaseHistory(username);
+
+  const handlePurchaseSuccess = useCallback(async () => {
+    await Promise.all([refreshHistory(), refreshProducts()]);
+  }, [refreshHistory, refreshProducts]);
+
+  const handleCheckout = useCallback(
+    async (paymentMethodCode: string, paymentMethodData: PaymentMethodData) => {
+      try {
+        const purchase = await checkout(paymentMethodCode, paymentMethodData);
+
+        // refresh directly when we know the purchase is successful, otherwise we wait for the polling to confirm it
+        if (purchase.status === "confirmed") {
+          try {
+            await handlePurchaseSuccess();
+          } catch (error: unknown) {
+            logPurchase.error(
+              "Refresh failed after immediate confirmation:",
+              error,
+            );
+            showError(
+              "Purchase was successful, but refreshing data failed. Please refresh the page.",
+            );
+          }
+        }
+        // on pending we wait for the PollingModal to confirm the purchase before refreshing
+      } catch (error: unknown) {
+        logPurchase.error("Checkout failed:", error);
+      }
+    },
+    [checkout, handlePurchaseSuccess, showError],
+  );
+
+  const handleRefund = useCallback(
+    async (purchaseId: string) => {
+      try {
+        await refundPurchase(purchaseId);
+        await refreshProducts();
+      } catch (error: unknown) {
+        logPurchase.error("Refund failed:", error);
+      }
+    },
+    [refundPurchase, refreshProducts],
+  );
+
+  const handlePurchaseModalComplete = useCallback(
+    (success: boolean) => {
+      finalizeCheckout(success);
+
+      if (success) {
+        handlePurchaseSuccess().catch((error: unknown) => {
+          logPurchase.error("Refresh failed after polling:", error);
+          showError(
+            "Purchase was successful, but refreshing data failed. Please refresh the page.",
+          );
+        });
+      }
+    },
+    [finalizeCheckout, handlePurchaseSuccess, showError],
+  );
+
+  const handleResumePolling = useCallback(
+    (purchase: PurchaseType) => {
+      resumePolling(purchase);
+    },
+    [resumePolling],
+  );
+
+  return (
+    <PosLayout
+      topAlert={
+        environmentMessage && <Alert color="info">{environmentMessage}</Alert>
+      }
+      sidebar={
+        <>
+          <Cart
+            cart={cart}
+            checkoutProcessing={checkoutProcessing}
+            removeFromCart={remove}
+            removeAllFromCart={clear}
+            checkoutCart={handleCheckout}
+          />
+          <PurchaseHistory
+            history={history}
+            loading={historyLoading}
+            resumePolling={handleResumePolling}
+            removeFromPurchaseHistory={(p: PurchaseType) => handleRefund(p.id)}
+            cartEmpty={cart.isEmpty}
+          />
+          <Menu username={username} />
+          <p className="text-xs mt-10 dark:text-white">
+            <Version />
+          </p>
+        </>
+      }
+      overlays={
+        <>
+          <ErrorModal message={errorMessage} onClose={handleCloseError} />
+          {isPolling && pendingPurchase && (
+            <PollingModal
+              purchase={pendingPurchase}
+              onComplete={handlePurchaseModalComplete}
+            />
+          )}
+        </>
+      }
+    >
+      <ProductList
+        products={products}
+        addToCart={add}
+        hasListItem={(g: GuestType) => cart.hasListItem(g.id)}
+        quantityByProductInCart={(p: ProductType) => cart.getQuantity(p.id)}
+        addProductInterest={(p: ProductType) => addInterest(p.id, p.name)}
+      />
+    </PosLayout>
+  );
+};
+
+export const Kasseapparat: React.FC = () => {
+  const { username } = useAuth();
+
+  if (!username) {
+    return (
+      <CriticalError
+        title="Authentication Error"
+        message="Critical Error. No Username was set."
+      />
+    );
+  }
+
+  return (
+    <ToastProvider>
+      <KasseapparatContent username={username} />
+    </ToastProvider>
+  );
+};
+
+export default Kasseapparat;

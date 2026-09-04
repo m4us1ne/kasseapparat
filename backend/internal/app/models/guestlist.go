@@ -5,7 +5,7 @@ type Guestlist struct {
 	GormOwnedModel
 
 	Name      string  `json:"name"`
-	TypeCode  bool    `gorm:"default:false" json:"typeCode"`
-	ProductID uint    `json:"productId"`
-	Product   Product `gorm:""              json:"product"`
+	TypeCode  bool    `json:"typeCode"  gorm:"default:false"`
+	ProductID int     `json:"productId"`
+	Product   Product `json:"product"   gorm:""`
 }

@@ -6,10 +6,19 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/potibm/kasseapparat/internal/app/models"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+)
+
+var (
+	meter                     = otel.Meter("kasseapparat")
+	productInterestCounter, _ = meter.Int64Counter("kasseapparat_product_interest_total",
+		metric.WithDescription("Total number of interests shown in out-of-stock products"))
 )
 
 type ProductInterestCreateRequest struct {
-	ProductID uint `binding:"required" form:"productId" json:"productId"`
+	ProductID int `json:"productId" form:"productId" binding:"required"`
 }
 
 func (handler *Handler) GetProductInterests(c *gin.Context) {
@@ -36,12 +45,7 @@ func (handler *Handler) GetProductInterests(c *gin.Context) {
 }
 
 func (handler *Handler) DeleteProductInterestByID(c *gin.Context) {
-	executingUserObj, err := handler.getUserFromContext(c)
-	if err != nil {
-		_ = c.Error(UnableToRetrieveExecutingUser.WithCause(err))
-
-		return
-	}
+	c = handler.contextWithUser(c)
 
 	id, _ := strconv.Atoi(c.Param("id"))
 
@@ -52,18 +56,13 @@ func (handler *Handler) DeleteProductInterestByID(c *gin.Context) {
 		return
 	}
 
-	handler.repo.DeleteProductInterest(*productInterest, *executingUserObj)
+	handler.repo.DeleteProductInterest(*productInterest)
 
 	c.Status(http.StatusNoContent)
 }
 
 func (handler *Handler) CreateProductInterest(c *gin.Context) {
-	executingUserObj, err := handler.getUserFromContext(c)
-	if err != nil {
-		_ = c.Error(UnableToRetrieveExecutingUser.WithCause(err))
-
-		return
-	}
+	c = handler.contextWithUser(c)
 
 	var productInterest models.ProductInterest
 
@@ -76,19 +75,26 @@ func (handler *Handler) CreateProductInterest(c *gin.Context) {
 
 	productInterest.ProductID = productInterestRequest.ProductID
 
-	product, err := handler.repo.GetProductByID(int(productInterest.ProductID)) // check if product exists
+	product, err := handler.repo.GetProductByID(productInterest.ProductID) // check if product exists
 	if product == nil || err != nil {
 		_ = c.Error(BadRequest.WithMsg("Product not found").WithCause(err))
 
 		return
 	}
 
-	productInterest, err = handler.repo.CreateProductInterest(productInterest, *executingUserObj)
+	productInterest, err = handler.repo.CreateProductInterest(productInterest)
 	if err != nil {
 		_ = c.Error(InternalServerError.WithCauseMsg(err))
 
 		return
 	}
+
+	productInterestCounter.Add(c.Request.Context(), 1,
+		metric.WithAttributes(
+			attribute.Int("product_id", int(productInterest.ProductID)),
+			attribute.String("product_name", product.Name),
+		),
+	)
 
 	c.JSON(http.StatusCreated, productInterest)
 }
