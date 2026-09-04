@@ -36,9 +36,17 @@ const Product: React.FC<ProductProps> = ({
   const availableStock =
     product.totalStock - product.unitsSold - quantityByProductInCart(product);
   const hasGuestlist = product.guestlists && product.guestlists.length > 0;
+  // totalStock === 0 means the product is not stock-tracked at all (tickets),
+  // so its availableStock runs negative and must not be read as "none left".
+  const tracksStock = product.totalStock > 0;
+  // Tracked products with a very large allowance are effectively unlimited;
+  // showing a running count for those is just noise.
+  const showStockCount = tracksStock && product.totalStock < 1000;
+  // For a tracked product, nothing left is sold out as far as the counter cares.
+  const isUnavailable = product.soldOut || (tracksStock && availableStock <= 0);
 
   const getActionButton = () => {
-    if (product.soldOut) {
+    if (isUnavailable) {
       return (
         <Button aria-label={"Register interest in " + product.name}>
           <HiOutlineThumbUp className="h-5 w-5" />
@@ -69,7 +77,7 @@ const Product: React.FC<ProductProps> = ({
 
   const handleCardClick = (e: React.MouseEvent) => {
     e.preventDefault();
-    if (product.soldOut) {
+    if (isUnavailable) {
       setIsPIModalOpen(true);
     } else if (hasGuestlist) {
       setIsGuestListModalOpen(true);
@@ -92,7 +100,7 @@ const Product: React.FC<ProductProps> = ({
         className="w-[22%] flex flex-col mb-5 mr-5 relative cursor-pointer"
         onClick={handleCardClick}
       >
-        {product.soldOut && (
+        {isUnavailable && (
           <Badge className="absolute top-2 right-2" color="gray">
             Sold Out ({product.soldOutRequestCount})
           </Badge>
@@ -101,7 +109,7 @@ const Product: React.FC<ProductProps> = ({
         <div className="flex items-center justify-between mt-auto">
           <h5
             className={`text-1xl text-left text-balance font-bold tracking-tight ${
-              product.soldOut
+              isUnavailable
                 ? "text-gray-400"
                 : "text-gray-900 dark:text-gray-200"
             }`}
@@ -109,10 +117,9 @@ const Product: React.FC<ProductProps> = ({
             {product.name}
           </h5>
 
-          {!product.soldOut && product.totalStock > 0 && (
-            <div className="text-sm dark:text-white">
-              {availableStock >= 0 && <span>{availableStock} / </span>}
-              {product.totalStock}
+          {!isUnavailable && showStockCount && (
+            <div className="text-1xl text-left text-balance font-bold tracking-tight text-gray-900 dark:text-gray-200">
+              {availableStock}
             </div>
           )}
         </div>
@@ -120,9 +127,7 @@ const Product: React.FC<ProductProps> = ({
         <div className="flex items-center justify-between mt-auto">
           <p
             className={`text-2xl font-bold ${
-              product.soldOut
-                ? "text-gray-400"
-                : "text-gray-900 dark:text-white"
+              isUnavailable ? "text-gray-400" : "text-gray-900 dark:text-white"
             }`}
           >
             {currency.format(product.grossPrice.toNumber())}
@@ -134,7 +139,7 @@ const Product: React.FC<ProductProps> = ({
 
       {product.wrapAfter && <div className="w-full"></div>}
 
-      {!product.soldOut && hasGuestlist && (
+      {!isUnavailable && hasGuestlist && (
         <GuestlistModal
           isOpen={isGuestListModalOpen}
           onClose={() => setIsGuestListModalOpen(false)}
@@ -144,7 +149,7 @@ const Product: React.FC<ProductProps> = ({
         />
       )}
 
-      {product.soldOut && (
+      {isUnavailable && (
         <ProductInterestModal
           show={isPIModalOpen}
           onClose={() => setIsPIModalOpen(false)}
