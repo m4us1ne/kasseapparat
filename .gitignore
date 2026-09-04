@@ -1,4 +1,9 @@
 bin/
+.direnv/
+.gobin/
+/.env
+/.env.*.example
+docker-compose.prod*.yaml
 .zed/
 .vscode/
 dist/
