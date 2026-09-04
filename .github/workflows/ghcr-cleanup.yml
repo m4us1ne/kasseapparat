@@ -19,7 +19,7 @@ jobs:
       - name: Fetch multi-platform package version SHAs
         id: multi-arch-digests
         run: |
-          DIGESTS=$(docker manifest inspect ghcr.io/potibm/kasseapparat | jq -r '.manifests[].digest' | paste -s -d ' ' -)
+          DIGESTS=$(docker manifest inspect "ghcr.io/${{ github.repository }}" | jq -r '.manifests[].digest' | paste -s -d ' ' -)
           echo "multi-arch-digests=$DIGESTS" >> "$GITHUB_ENV"
 
       - name: Run container-retention-policy
